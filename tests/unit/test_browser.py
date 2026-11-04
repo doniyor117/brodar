@@ -8,6 +8,8 @@ import asyncio
 
 import pytest
 
+pytest.importorskip('playwright',reason='Install brodar[browser] for optional browser contracts')
+
 from pathlib import Path
 
 from hamroh.tools.browser.browser import (

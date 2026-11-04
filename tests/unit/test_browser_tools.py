@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip('playwright',reason='Install brodar[browser] for optional browser contracts')
+
 from hamroh.storage.render_store import RenderStore
 from hamroh.tools.base import ToolContext
 from hamroh.tools.browser.browser_click import BrowserClickArgs, BrowserClickTool

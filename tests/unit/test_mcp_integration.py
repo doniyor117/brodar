@@ -22,6 +22,7 @@ hamroh's plumbing, not their uptime.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -32,8 +33,8 @@ import pytest
 from hamroh.plugins import load_plugins
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("claude") is None,
-    reason="claude CLI not on PATH — install Claude Code to run integration tests",
+    shutil.which("claude") is None or os.environ.get('BRODAR_LIVE_CLAUDE_TESTS')!='1',
+    reason="Opt in with BRODAR_LIVE_CLAUDE_TESTS=1 and an authenticated Claude CLI for live integration tests",
 )
 
 
