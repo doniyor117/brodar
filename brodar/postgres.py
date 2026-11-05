@@ -16,6 +16,7 @@ from importlib.resources import files
 from urllib.parse import unquote, urlsplit
 
 import pg8000.dbapi
+from .write_fence import WRITE_FENCE
 
 
 class Postgres:
@@ -42,6 +43,8 @@ class Postgres:
     @contextmanager
     def transaction(self, audience: str | None = None, *, readonly: bool = False):
         with self._lock:
+            guard=WRITE_FENCE.get() if not readonly else None
+            if guard:guard()
             conn = self._connect()
             cur = conn.cursor()
             try:
@@ -49,6 +52,7 @@ class Postgres:
                 if audience is not None:
                     cur.execute("SELECT set_config('brodar.audience', %s, true)", (audience,))
                 yield cur
+                if guard:guard()
                 conn.commit()
             except BaseException:
                 try:

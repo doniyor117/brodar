@@ -23,6 +23,7 @@ dependencies = [
     "boto3>=1.35,<2",
     "python-pptx>=1.0,<2",
     "cryptography>=44",
+    "tzdata>=2025.1",
     "python-telegram-bot[rate-limiter]>=22.8,<23",
 ]
 

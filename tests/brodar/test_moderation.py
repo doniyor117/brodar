@@ -60,3 +60,25 @@ def test_reply_target_and_duration_come_from_fresh_request_metadata():
     assert request.action=='mute' and request.target==3 and request.minutes==15
     assert requests([row(1,'/mute 3 0')])==[]
     assert requests([row(1,'/mute 3 1441')])==[]
+
+
+def test_latest_edit_revokes_command_and_other_bot_suffix_is_not_authority():
+    first=row(1,'/ban 3');edit=row(1,'never mind, do not ban anyone');edit['message_id']=first['message_id']
+    edit['payload']['edited_message']=edit['payload'].pop('message')
+    assert requests([first,edit])==[]
+    assert requests([row(1,'/ban@OtherBot 3')],bot_username='BrodarBot')==[]
+    assert len(requests([row(1,'/ban@BrodarBot 3')],bot_username='brodarbot'))==1
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_during_live_rights_check_revokes_moderation(monkeypatch):
+    import asyncio
+    entered=asyncio.Event();release=asyncio.Event()
+    async def rights(*args):entered.set();await release.wait()
+    monkeypatch.setattr('brodar.moderation.authorize',rights)
+    source=row(1,'/ban 3');bot=Bot();broker=ToolBroker(SimpleNamespace(scope=Scope(99,-100)),bot)
+    broker.begin(TurnCapability(str(uuid4())),moderation_requests=requests([source]))
+    task=asyncio.create_task(broker.moderate(source['message_id'],'ban'))
+    await entered.wait();broker.revoke_request_ids([source['message_id']]);release.set()
+    with pytest.raises(PermissionError,match='withdrawn'):await task
+    assert not bot.actions

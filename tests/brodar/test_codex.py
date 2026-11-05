@@ -96,3 +96,25 @@ async def test_missing_local_session_starts_new_thread_for_canonical_restore(tmp
     assert start['environments']==[] and start['allowProviderModelFallback'] is False
     assert b.session_id=='thread'
     await b.close()
+
+
+@pytest.mark.asyncio
+async def test_timeout_cancellation_interrupts_before_turn_id_is_cleared(tmp_path):
+    class Pending(FakeRpc):
+        async def request(self,method,params):
+            if method=='turn/start':
+                self.requests.append((method,params))
+                return {'turn':{'id':'still-running','status':'inProgress'}}
+            return await super().request(method,params)
+    brain=CodexBrain(home=tmp_path/'home',cwd=tmp_path/'work',model='model',effort='low',
+        instructions='fixed',transport_factory=Pending)
+    await brain.start()
+    task=asyncio.create_task(brain.turn('work'))
+    for _ in range(20):
+        if brain.active_turn:break
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):await task
+    assert ('turn/interrupt',{'threadId':'thread','turnId':'still-running'}) in brain.rpc.requests
+    assert brain.active_turn is None
+    await brain.close()

@@ -10,6 +10,65 @@ from uuid import uuid4
 
 
 class RuntimeStore(ScopedStore):
+    async def work_begin(self,uid,requester_id,message_ids):
+        payload={'requester_id':requester_id,'request_message_id':message_ids[0],
+                 'message_ids':message_ids,'consumer_owner':self.lease_owner}
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
+                              (self.scope.bot_id,self.lease_owner))
+                    if c.fetchone() is None:raise PermissionError('Work consumer lease expired')
+                c.execute("INSERT INTO brodar_v2.jobs(id,audience,topic_id,kind,payload,dedup_key,status,attempts) "
+                          "VALUES (%s,%s,%s,'work',%s::jsonb,%s,'running',1) ON CONFLICT(id) DO UPDATE "
+                          "SET status=CASE WHEN jobs.status IN ('done','cancelled') THEN jobs.status ELSE 'running' END,"
+                          "attempts=jobs.attempts+1,payload=jsonb_set(jsonb_set(jobs.payload,'{consumer_owner}',%s::jsonb),"
+                          "'{message_ids}',coalesce(jobs.payload->'message_ids','[]'::jsonb)||%s::jsonb),updated_at=now() RETURNING status,checkpoint",
+                          (uid,self.scope.audience,self.scope.topic_id,json.dumps(payload),uid,json.dumps(self.lease_owner),json.dumps(message_ids)))
+                return records(c)[0]
+        return await self.db.run(op)
+
+    async def work_checkpoint(self,uid,text):
+        if not text.strip() or len(text)>12000:raise ValueError('Checkpoint must contain 1..12000 characters')
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
+                              (self.scope.bot_id,self.lease_owner))
+                    if c.fetchone() is None:raise PermissionError('Work consumer lease expired')
+                c.execute("UPDATE brodar_v2.jobs SET checkpoint=%s::jsonb,updated_at=now() WHERE audience=%s AND id=%s "
+                          "AND kind='work' AND status='running' AND payload->>'consumer_owner' IS NOT DISTINCT FROM %s RETURNING id",
+                          (json.dumps({'notes':scrub(text)}),self.scope.audience,str(uid),self.lease_owner))
+                if c.fetchone() is None:raise PermissionError('No current active work item can accept this checkpoint')
+                return {'job_id':str(uid),'checkpoint_saved':True}
+        return await self.db.run(op)
+
+    async def work_add_inputs(self,uid,message_ids):
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                c.execute("UPDATE brodar_v2.jobs SET payload=jsonb_set(payload,'{message_ids}',"
+                          "coalesce(payload->'message_ids','[]'::jsonb)||%s::jsonb) WHERE audience=%s AND id=%s "
+                          "AND payload->>'consumer_owner' IS NOT DISTINCT FROM %s",
+                          (json.dumps(message_ids),self.scope.audience,str(uid),self.lease_owner))
+        await self.db.run(op)
+
+    async def work_list(self,limit=30):
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute("SELECT id,topic_id,status,checkpoint,attempts,created_at,updated_at,payload->>'requester_id' AS requester_id "
+                          "FROM brodar_v2.jobs WHERE audience=%s AND kind='work' ORDER BY updated_at DESC LIMIT %s",
+                          (self.scope.audience,max(1,min(limit,100))))
+                return records(c)
+        return await self.db.run(op)
+
+    async def work_artifacts(self,uid):
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute('SELECT id AS artifact_id,filename FROM brodar_v2.artifacts WHERE audience=%s AND turn_id=%s',
+                          (self.scope.audience,str(uid)))
+                return records(c)
+        return await self.db.run(op)
+
     async def history_browse(self,*,before_id=None,sender_id=None,topic_id=None,limit=40):
         """Walk the archive without relying on semantic search finding a quote."""
         from uuid import UUID
@@ -67,14 +126,23 @@ class RuntimeStore(ScopedStore):
                 return sorted(records(c),key=lambda r:r['update_id'])
         return await self.db.run(op)
 
-    async def finish_inputs(self,ids,*,error=None,retry=False):
+    async def finish_inputs(self,ids,*,error=None,retry=False,job_id=None):
         if not ids:return
         def op():
             with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
+                              (self.scope.bot_id,self.lease_owner))
+                    if c.fetchone() is None:return
                 c.execute('UPDATE brodar_v2.inbox SET status=%s,lease_until=NULL,error_code=%s '
                           'WHERE audience=%s AND id=ANY(%s::uuid[]) AND '
                           '(%s::uuid IS NULL OR lease_owner=%s::uuid OR (status=\'pending\' AND lease_owner IS NULL))',
                           ('pending' if retry else ('failed' if error else 'done'),error,self.scope.audience,[str(x) for x in ids],self.lease_owner,self.lease_owner))
+                if job_id:
+                    status='pending' if retry else ('cancelled' if error in {'cancelled','turn_cancelled_or_timed_out'} else ('failed' if error else 'done'))
+                    c.execute("UPDATE brodar_v2.jobs SET status=%s,updated_at=now() WHERE audience=%s AND id=%s AND kind='work' "
+                              "AND payload->>'consumer_owner' IS NOT DISTINCT FROM %s",
+                              (status,self.scope.audience,str(job_id),self.lease_owner))
         await self.db.run(op)
 
     async def session_get(self,provider,prompt_revision):

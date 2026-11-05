@@ -165,6 +165,16 @@ class CodexBrain:
             return await self._waiter
         except RpcError as exc:
             return Outcome('failed',error=f'rpc:{exc.code}',session_id=self.session_id)
+        except asyncio.CancelledError:
+            # wait_for cancels this coroutine before the runtime can call
+            # interrupt. Send the interrupt while the actual turn ID survives.
+            if self.active_turn:
+                try:
+                    await asyncio.wait_for(asyncio.shield(self.rpc.request('turn/interrupt',{
+                        'threadId':self.session_id,'turnId':self.active_turn})),10)
+                except Exception:
+                    await self.rpc.close()
+            raise
         finally:
             self._completed.clear()
             self._texts.clear()

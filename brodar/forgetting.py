@@ -34,6 +34,8 @@ async def forget_messages(db,audience,message_ids):
             c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='message' AND source_id=ANY(%s::uuid[])",
                       (audience,ids))
             c.execute('DELETE FROM brodar_v2.inbox WHERE audience=%s AND message_id=ANY(%s::uuid[])',(audience,ids))
+            c.execute("DELETE FROM brodar_v2.jobs WHERE audience=%s AND (payload->>'request_message_id'=ANY(%s::text[]) "
+                      "OR coalesce(payload->'message_ids','[]'::jsonb) ?| %s::text[])",(audience,ids,ids))
             c.execute('DELETE FROM brodar_v2.messages WHERE audience=%s AND id=ANY(%s::uuid[])',(audience,ids))
             # Audit outputs may contain copies returned by history/memory tools.
             # Keep no model-readable copies there after explicit source deletion.

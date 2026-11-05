@@ -45,6 +45,9 @@ class AuditedMcp(FastMCP):
             output=None
             error=None
             try:
+                supplied=named.pop('turn_token',None)
+                if cap is None or not isinstance(supplied,str) or not secrets.compare_digest(supplied,cap.token):
+                    raise PermissionError('Tool authorization belongs to a different or completed turn')
                 output=await fn(*values,**named)
                 return output
             except BaseException as exc:
@@ -57,6 +60,9 @@ class AuditedMcp(FastMCP):
                         arguments=arguments,result=output,error=error,duration_ms=int((time.monotonic()-start)*1000))
                 except Exception as exc:
                     logging.getLogger('brodar.audit').error('Tool audit unavailable: %s',type(exc).__name__)
+        audited.__signature__=signature.replace(parameters=[*signature.parameters.values(),
+            inspect.Parameter('turn_token',inspect.Parameter.KEYWORD_ONLY,annotation=str)])
+        audited.__doc__=(fn.__doc__ or '')+'\nEvery call requires the exact turn_token from the current host <turn> envelope.'
         return super().add_tool(audited,*args,**kwargs)
 
 
@@ -87,6 +93,34 @@ def build_tools(broker):
     async def telegram_moderate(request_message_id:str,operation_id:str)->str:
         """Carry out a fresh explicit /ban USER_ID, /mute USER_ID MINUTES, or /delete MESSAGE_ID request (reply targets also work). Both requester and bot need live Telegram admin rights. Use the request's archive UUID; historical/forwarded requests cannot authorize actions."""
         return result(await broker.moderate(request_message_id,operation_id))
+
+    @mcp.tool()
+    async def reminder_create(request_message_id:str,when:str,text:str,operation_id:str)->str:
+        """Schedule a requested one-shot reminder in this chat/topic. Use a fresh request archive UUID and future ISO time with timezone. Not recurring. Saved remotely and recovered after restart."""
+        return result(await broker.reminder_create(request_message_id,when,text,operation_id))
+
+    @mcp.tool()
+    async def reminder_list(limit:int=30)->str:
+        """List this audience's durable reminders and their pending/done/cancelled/uncertain status."""
+        from .jobs import Reminders
+        broker.require()
+        return result(await Reminders(broker.store).list(limit))
+
+    @mcp.tool()
+    async def reminder_cancel(request_message_id:str,job_id:str)->str:
+        """Cancel a reminder using its job ID and a fresh request archive UUID. The requester or configured owner can cancel it."""
+        return result(await broker.reminder_cancel(request_message_id,job_id))
+
+    @mcp.tool()
+    async def task_checkpoint(notes:str)->str:
+        """Save useful progress and the next step for the current task, so a restart can resume it. Does not post a message or mark work finished."""
+        return result(await broker.task_checkpoint(notes))
+
+    @mcp.tool()
+    async def task_status(limit:int=30)->str:
+        """List durable work IDs, progress checkpoints and done/pending/failed/cancelled status in this audience."""
+        broker.require()
+        return result(await broker.store.work_list(limit))
 
     @mcp.tool()
     async def history_search(query:str,limit:int=10)->str:

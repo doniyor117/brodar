@@ -32,7 +32,7 @@ async def doctor(cfg):
 
 def main():
     parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.')
-    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','backup','restore','forget-history'],default='run')
+    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','backup','restore','forget-history','setup-storage'],default='run')
     parser.add_argument('--brain',choices=['codex','claude'])
     parser.add_argument('--env-file',type=Path)
     parser.add_argument('--admin-url-file',type=Path,help='Private file holding an operator database URL; never pass a URL on the command line')
@@ -48,11 +48,21 @@ def main():
     parser.add_argument('--backup-id')
     parser.add_argument('--audience')
     parser.add_argument('--message-id',action='append',default=[])
+    parser.add_argument('--project-id')
+    parser.add_argument('--branch-id')
     args=parser.parse_args()
     logging.basicConfig(level=logging.WARNING,format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.ERROR)
     cfg=Settings.load(env_file=args.env_file,brain=args.brain)
-    if args.command in {'migrate','provision','import-history','export-history','backup','restore','forget-history'}:
+    if args.command=='setup-storage':
+        import os
+        from dotenv import dotenv_values
+        from .storage_setup import setup_storage
+        values=dotenv_values(args.env_file or Path.home()/'secrets/.env')
+        if args.storage_config is None:parser.error('--storage-config is required')
+        key=os.environ.get('NEON_API_KEY') or values.get('NEON_API_KEY')
+        print(json.dumps(asyncio.run(setup_storage(key,args.project_id,args.branch_id,args.storage_config)),indent=2))
+    elif args.command in {'migrate','provision','import-history','export-history','backup','restore','forget-history'}:
         from .operator import database_command
         print(json.dumps(asyncio.run(database_command(args)),indent=2))
     elif args.command=='login':

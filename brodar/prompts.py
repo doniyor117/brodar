@@ -6,7 +6,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 
-def compose(*,model:str,provider:str,tools:list[str]):
+def compose(*,model:str,provider:str,tools:list[str],timezone:str='UTC'):
     root=Path(__file__).resolve().parent.parent/'prompts'
     if (root/'brodar.md').exists():
         persona=(root/'brodar.md').read_text()
@@ -19,6 +19,7 @@ def compose(*,model:str,provider:str,tools:list[str]):
     fixed=persona+'\n\n'+harness
     revision=hashlib.sha256(fixed.encode()).hexdigest()
     runtime='\n\n# runtime\n\n'+f'provider: {provider}\nmodel: {model}\n'
+    runtime+=f'configured local timezone: {timezone}\n'
     runtime+='\nuse the exact tool names supplied by the runtime. available brodar tools:\n'
     runtime+='\n'.join('- '+name for name in tools)
     return fixed+runtime,revision
@@ -38,3 +39,8 @@ def envelope(messages,*,context=None,notes=None,receipts=None):
     if receipts:blocks.append('<previous_delivery_receipts>'+escape(json.dumps(receipts,default=str))+'</previous_delivery_receipts>')
     blocks.append('<new_messages>'+''.join(xmlmessage(m) for m in messages)+'</new_messages>')
     return '\n'.join(blocks)
+
+
+def authorized(payload,capability):
+    from xml.sax.saxutils import quoteattr
+    return '<turn turn_token='+quoteattr(capability.token)+'>'+payload+'</turn>'

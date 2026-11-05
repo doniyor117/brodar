@@ -22,6 +22,7 @@ class Settings:
     instance_id:str='brodar'
     debounce_seconds:float=1.5
     ambient_interval:float=30.0
+    timezone:str='UTC'
 
     @classmethod
     def load(cls,*,env_file:Path|None=None,brain:str|None=None):
@@ -44,7 +45,10 @@ class Settings:
                 runtime_dir=Path(values.get('BRODAR_RUNTIME_DIR',str(Path.home()/'.local/share/brodar'))).expanduser().resolve(),
                 instance_id=values.get('BRODAR_INSTANCE_ID','brodar'),
                 debounce_seconds=float(values.get('BRODAR_DEBOUNCE_SECONDS','1.5')),
-                ambient_interval=float(values.get('BRODAR_AMBIENT_INTERVAL','30')))
+                ambient_interval=float(values.get('BRODAR_AMBIENT_INTERVAL','30')),
+                timezone=values.get('BRODAR_TIMEZONE','UTC'))
+        from zoneinfo import ZoneInfo
+        ZoneInfo(cfg.timezone)
         if not cfg.instance_id or any(x not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for x in cfg.instance_id):
             raise ValueError('Invalid deployment instance ID')
         if cfg.debounce_seconds<0 or cfg.ambient_interval<1:raise ValueError('Invalid timing settings')

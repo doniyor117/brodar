@@ -16,17 +16,19 @@ class Request:
     minutes:int|None=None
 
 
-def requests(batch):
+def requests(batch,bot_username=None):
     found=[]
-    for row in batch:
+    latest={str(row['message_id']):row for row in batch}
+    for row in latest.values():
         message=row['payload'].get('message') or row['payload'].get('edited_message') or {}
         actor=message.get('from') or {}
         if (message.get('sender_chat') or message.get('forward_origin') or
                 message.get('forward_from') or not actor.get('id') or actor.get('is_bot')):continue
         text=message.get('text','').strip()
-        match=re.fullmatch(r'/?(ban|mute|delete)(?:@[A-Za-z0-9_]+)?(?:\s+(\d+))?(?:\s+(\d+))?',text,re.I)
+        match=re.fullmatch(r'/?(ban|mute|delete)(?:@([A-Za-z0-9_]+))?(?:\s+(\d+))?(?:\s+(\d+))?',text,re.I)
         if not match:continue
-        action,number,duration=match.groups();action=action.lower()
+        action,recipient,number,duration=match.groups();action=action.lower()
+        if recipient and (not bot_username or recipient.lower()!=bot_username.lower()):continue
         reply=message.get('reply_to_message') or {}
         if action=='delete':
             target=int(number) if number else reply.get('message_id')

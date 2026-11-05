@@ -25,7 +25,7 @@ async def stores():
     def cleanup():
         for s in [a,b]:
             with db.transaction(s.scope.audience) as c:
-                for table in ['memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources']:
+                for table in ['memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources','jobs']:
                     c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(s.scope.audience,))
                 c.execute('DELETE FROM brodar_v2.poll_state WHERE bot_id=%s',(bot_id,))
                 c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(s.scope.audience,))
@@ -48,6 +48,36 @@ async def test_duplicate_ingestion_and_edits_preserve_inbox(stores):
     rows=await a.recent()
     assert len(rows)==1 and rows[0]['content']=='hello'
     assert await b.recent()==[]
+
+
+@pytest.mark.asyncio
+async def test_reminder_restart_deduplication_permissions_and_cancel(stores):
+    from brodar.jobs import Reminders,InputRequest
+    from brodar.recovery import ConsumerLease
+    from brodar.runtime_store import RuntimeStore
+    from datetime import timedelta
+    a,b=stores
+    lease=ConsumerLease(a.db,a.scope.bot_id);await lease.acquire()
+    store=RuntimeStore(a.db,a.scope,lease_owner=lease.owner);jobs=Reminders(store)
+    request=InputRequest(str(uuid4()),42,'remind me')
+    when=(datetime.now(timezone.utc)+timedelta(minutes=1)).isoformat()
+    try:
+        first=await jobs.create(request,when,'persisted reminder','one')
+        assert (await jobs.create(request,when,'persisted reminder','one'))['job_id']==first['job_id']
+        assert (await Reminders(RuntimeStore(a.db,a.scope,lease_owner=lease.owner)).list())[0]['text']=='persisted reminder'
+        assert await Reminders(b).list()==[]
+        with pytest.raises(PermissionError):await jobs.cancel(first['job_id'],43)
+        def due():
+            with a.db.transaction(a.scope.audience) as c:
+                c.execute("UPDATE brodar_v2.jobs SET due_at=now()-interval '1 second' WHERE id=%s",(first['job_id'],))
+        await a.db.run(due)
+        claimed=await jobs.claim();assert len(claimed)==1
+        await jobs.active(first['job_id'])
+        result=await jobs.cancel(first['job_id'],42)
+        assert result['delivery_may_be_in_flight']
+        with pytest.raises(PermissionError):await jobs.active(first['job_id'])
+        assert await jobs.claim()==[]
+    finally:await lease.release()
 
 
 @pytest.mark.asyncio
@@ -104,6 +134,9 @@ async def test_consumer_takeover_reclaims_work_and_fences_previous_owner(stores)
         await add(old,'recover this task')
         claimed=await old.claim_inputs()
         assert len(claimed)==1
+        uid=str(claimed[0]['id'])
+        await old.work_begin(uid,42,[str(claimed[0]['message_id'])])
+        await old.work_checkpoint(uid,'deck created; next send the actual file')
         def expire():
             with a.db.transaction() as c:
                 c.execute("UPDATE brodar_v2.poll_state SET lease_until=now()-interval '1 second' WHERE bot_id=%s",(a.scope.bot_id,))
@@ -113,15 +146,19 @@ async def test_consumer_takeover_reclaims_work_and_fences_previous_owner(stores)
         with pytest.raises(PermissionError):await old.claim_inputs()
         reclaimed=await new.claim_inputs()
         assert reclaimed[0]['id']==claimed[0]['id'] and reclaimed[0]['attempts']==2
-        await old.finish_inputs([claimed[0]['id']])
+        await old.finish_inputs([claimed[0]['id']],job_id=uid)
+        recovered=await new.work_begin(uid,42,[str(claimed[0]['message_id'])])
+        assert recovered['status']=='running' and recovered['checkpoint']['notes']=='deck created; next send the actual file'
+        with pytest.raises(PermissionError):await old.work_checkpoint(uid,'stale write')
         def status():
             with a.db.transaction(a.scope.audience,readonly=True) as c:
                 c.execute('SELECT status,lease_owner FROM brodar_v2.inbox WHERE id=%s',(str(claimed[0]['id']),))
                 return c.fetchone()
         row=await a.db.run(status)
         assert row[0]=='running' and str(row[1])==second.owner
-        await new.finish_inputs([claimed[0]['id']])
+        await new.finish_inputs([claimed[0]['id']],job_id=uid)
         assert (await a.db.run(status))[0]=='done'
+        assert (await new.work_list())[0]['status']=='done'
     finally:
         await first.release()
         await second.release()
@@ -136,18 +173,26 @@ async def test_source_forgetting_removes_derivatives_and_prevents_reimport(store
     a=LearningStore(a.db,a.scope)
     await add(a,'source detail to forget')
     mid=str((await a.recent())[0]['id'])
+    await add(a,'unrelated first source',update=2)
+    other=str((await a.recent())[-1]['id'])
+    work_id=str(uuid4())
+    await a.work_begin(work_id,42,[other])
+    await a.work_begin(work_id,42,[other,mid])
+    work=(await a.work_list())[0]
+    await a.work_checkpoint(str(work['id']),'checkpoint contains source detail to forget')
     await a.memory_write('context/detail.md','learned from that source',expected_revision=0,reason='fixture',source_ids=[mid])
     await a.session_put('codex','fixture','stale-session')
     result=await forget_messages(a.db,a.scope.audience,[mid])
     assert result['forgotten_messages']==1 and result['retired_source_linked_notes']==1
     assert await a.memory_read('context/detail.md') is None
-    assert await a.recent()==[]
+    assert len(await a.recent())==1 and (await a.recent())[0]['content']=='unrelated first source'
+    assert await a.work_list()==[]
     assert await a.session_get('codex','fixture') is None
     assert (await add(a,'source detail to forget',update=1))[1] is False
     archive={'source':'legacy-fixture','tables':{'messages':[{'id':1,'chat_id':a.scope.chat_id,
         'created_at':'2026-07-25 12:00:00','role':'user','content':'legacy detail'}]}}
     assert (await import_messages(a.db,archive,instance_id=a.scope.instance_id))['inserted']==1
-    legacy=str((await a.recent())[0]['id'])
+    legacy=str(next(row for row in await a.recent() if row['source']=='legacy-fixture')['id'])
     await forget_messages(a.db,a.scope.audience,[legacy])
     assert (await import_messages(a.db,archive,instance_id=a.scope.instance_id))['inserted']==0
     assert await verify_import(a.db,archive,instance_id=a.scope.instance_id)==0

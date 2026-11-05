@@ -49,6 +49,7 @@ def main():
             proc=subprocess.Popen(argv,cwd=repo,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
             try:
                 deadline=time.monotonic()+900
+                timed_out=False
                 while True:
                     try:
                         output,_=proc.communicate(timeout=1)
@@ -56,8 +57,11 @@ def main():
                     except subprocess.TimeoutExpired:
                         if stop.is_set() or time.monotonic()>deadline:
                             proc.kill();proc.communicate()
-                            if not stop.is_set():log.error('Scheduled backup timed out')
-                            return
+                            if stop.is_set():return
+                            log.error('Scheduled backup timed out; next scheduled backup remains enabled')
+                            timed_out=True
+                            break
+                if timed_out:continue
                 if proc.returncode:log.error('Scheduled backup failed code=%s; run the operator command to diagnose',proc.returncode)
                 else:log.info('Scheduled backup complete id=%s',json.loads(output)['backup_id'])
             except Exception as exc:log.error('Backup status unavailable: %s',type(exc).__name__)

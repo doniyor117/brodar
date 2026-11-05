@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass,field
+import secrets
 from uuid import UUID
 
 from telegram.error import BadRequest,Forbidden,NetworkError,RetryAfter
 
 from .store import RevisionConflict
+from .write_fence import guarded_write,WRITE_FENCE
 
 
 @dataclass(frozen=True)
@@ -17,24 +19,36 @@ class TurnCapability:
     mode: str = 'conversation'
     requester_id: int | None = None
     request_message_id: int | None = None
+    token:str=field(default_factory=lambda:secrets.token_urlsafe(24),repr=False)
 
 
 class ToolBroker:
-    def __init__(self,store,bot,*,embeddings=None,artifacts=None,delivery_guard=None):
+    def __init__(self,store,bot,*,embeddings=None,artifacts=None,delivery_guard=None,owner_ids=()):
         self.store,self.bot,self.embeddings=store,bot,embeddings
         self.artifacts=artifacts
         self.delivery_guard=delivery_guard
+        self.owner_ids=owner_ids
         self.capability=None
         self._reads={}
         self._delivery_lock=asyncio.Lock()
         self._moderation_requests={}
+        self._requests={}
 
-    def begin(self,capability:TurnCapability,*,moderation_requests=()):
+    def begin(self,capability:TurnCapability,*,moderation_requests=(),requests=()):
         if self.capability is not None:raise RuntimeError('Previous capability is still active')
         UUID(capability.turn_id)
         self.capability=capability
         self._reads.clear()
         self.accept_moderation_requests(moderation_requests)
+        self.accept_requests(requests)
+
+    def accept_requests(self,requests):
+        for request in requests:self._requests[request.id]=request
+
+    def revoke_request_ids(self,ids):
+        for uid in ids:
+            self._requests.pop(str(uid),None)
+            self._moderation_requests.pop(str(uid),None)
 
     def accept_moderation_requests(self,requests):
         for request in requests:self._moderation_requests[request.message_id]=request
@@ -43,6 +57,43 @@ class ToolBroker:
         self.capability=None
         self._reads.clear()
         self._moderation_requests.clear()
+        self._requests.clear()
+
+    def fresh_request(self,uid):
+        self.require(visible=True)
+        request=self._requests.get(uid)
+        if request is None:raise PermissionError('Use an actual fresh request archive ID from this turn')
+        previous=WRITE_FENCE.get()
+        if previous:
+            def current_request():
+                previous()
+                if self._requests.get(uid) is not request:raise PermissionError('The authorizing request was edited or withdrawn')
+            WRITE_FENCE.set(current_request)  # enclosing guarded_write resets the original context token
+        return request
+
+    @guarded_write
+    async def reminder_create(self,request_id,when,text,operation_id):
+        import re
+        from .jobs import Reminders
+        request=self.fresh_request(request_id)
+        if not re.search(r'remind|timer|alarm|eslat|taymer|напом|таймер|будильник',request.text,re.I):
+            raise PermissionError('The fresh request must explicitly ask for a reminder/timer')
+        return await Reminders(self.store).create(request,when,text,operation_id)
+
+    @guarded_write
+    async def reminder_cancel(self,request_id,job_id):
+        import re
+        from .jobs import Reminders
+        request=self.fresh_request(request_id)
+        cancel=re.search(r'cancel|stop|delete|remove|bekor|отмен|удал',request.text,re.I)
+        reference=job_id in request.text or re.search(r'remind|timer|alarm|eslat|taymer|напом|таймер|будильник',request.text,re.I)
+        if not cancel or not reference:raise PermissionError('The fresh request must ask to cancel this reminder')
+        return await Reminders(self.store).cancel(job_id,request.actor,self.owner_ids)
+
+    @guarded_write
+    async def task_checkpoint(self,notes):
+        cap=self.require(visible=True)
+        return await self.store.work_checkpoint(cap.turn_id,notes)
 
     async def moderate(self,request_message_id,operation_id):
         from .moderation import authorize,perform
@@ -51,9 +102,13 @@ class ToolBroker:
         if request is None:raise PermissionError('No fresh explicit moderation request with this archive ID')
         if request.action=='delete':await self.message_target(request.target)
         await authorize(self.bot,self.store.scope,request)
+        async def current_request():
+            if self._moderation_requests.get(request_message_id) is not request:
+                raise PermissionError('The moderation request was edited or withdrawn')
+        await current_request()
         async def send():return await perform(self.bot,self.store.scope,request)
         return await self.deliver(cap,'moderate',{'request_message_id':request_message_id,
-            'actor_id':request.actor_id,'action':request.action,'target':request.target,'minutes':request.minutes},operation_id,send)
+            'actor_id':request.actor_id,'action':request.action,'target':request.target,'minutes':request.minutes},operation_id,send,preflight=current_request)
 
     def require(self,*,visible=False):
         cap=self.capability
@@ -118,7 +173,7 @@ class ToolBroker:
         async def send():return await self.bot.send_message(**kwargs)
         return await self.deliver(cap,'send_message',{'text':text,'reply_to_message_id':reply_to_message_id},call_id,send)
 
-    async def deliver(self,cap,method,request,call_id,send):
+    async def deliver(self,cap,method,request,call_id,send,*,preflight=None):
         if not call_id or len(call_id)>200:raise ValueError('Use an operation ID of 1 to 200 characters')
         async with self._delivery_lock:
             if self.capability is not cap:raise PermissionError('Turn was cancelled')
@@ -132,9 +187,10 @@ class ToolBroker:
             if receipt['status']=='sent':return receipt['response']
             if receipt['status']!='pending':
                 raise RuntimeError('Previous delivery is failed, in progress or uncertain; do not blindly replay it')
-            if self.delivery_guard:
+            if self.delivery_guard or preflight:
                 try:
-                    await self.delivery_guard()
+                    if self.delivery_guard:await self.delivery_guard()
+                    if preflight:await preflight()
                     if self.capability is not cap:raise PermissionError('Turn was cancelled before delivery')
                 except BaseException:
                     await asyncio.shield(self.store.delivery_finish(receipt['id'],'failed',{'error':'delivery_guard_rejected_before_send'}))
@@ -174,6 +230,7 @@ class ToolBroker:
         async def send():return await self.bot.send_document(**kwargs)
         return await self.deliver(cap,'send_document',{'artifact_id':artifact_id,'filename':row['filename'],'caption':caption},call_id,send)
 
+    @guarded_write
     async def create_presentation(self,title,slides,filename,operation_id):
         cap=self.require(visible=True)
         if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
@@ -188,6 +245,7 @@ class ToolBroker:
             mime='application/vnd.openxmlformats-officedocument.presentationml.presentation',body=body,
             request_hash=request_hash,metadata={'title':title,'slides':len(slides)})
 
+    @guarded_write
     async def create_file(self,filename,text,operation_id):
         cap=self.require(visible=True)
         if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
@@ -214,6 +272,7 @@ class ToolBroker:
         self._reads[path]=note['revision'] if note else 0
         return note
 
+    @guarded_write
     async def memory_write(self,path,content,expected_revision,reason,source_ids=None,subject_ids=None,confidence='observed'):
         self.require()
         if expected_revision and self._reads.get(path)!=expected_revision:
@@ -223,6 +282,7 @@ class ToolBroker:
         self._reads[path]=result['revision']
         return result
 
+    @guarded_write
     async def memory_delete(self,path,expected_revision,reason):
         self.require()
         if self._reads.get(path)!=expected_revision:
@@ -240,12 +300,14 @@ class ToolBroker:
         if self._reads.get(path)!=expected_revision:
             raise RevisionConflict('Read the current document or its history before changing it')
 
+    @guarded_write
     async def memory_restore(self,path,revision,expected_revision,reason):
         self.require_read(path,expected_revision)
         result=await self.store.memory_restore(path,revision,expected_revision=expected_revision,reason=reason)
         self._reads[path]=result['revision']
         return result
 
+    @guarded_write
     async def memory_forget(self,path,expected_revision):
         self.require_read(path,expected_revision)
         result=await self.store.memory_forget(path,expected_revision=expected_revision)
