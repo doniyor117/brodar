@@ -23,8 +23,8 @@ class GeminiEmbeddings:
         self.dimensions = DIMENSIONS
 
     async def embed(self, text: str, *, query: bool = False) -> list[float]:
-        if not text.strip() or len(text) > 7000:
-            raise ValueError('Embed one nonempty chunk of at most 7000 characters')
+        if not text.strip() or len(text.encode('utf-8')) > 7800:
+            raise ValueError('Embed one nonempty chunk of at most 7800 UTF-8 bytes')
         prompt = (f'task: search result | query: {text}' if query
                   else f'title: conversation context | text: {text}')
         try:

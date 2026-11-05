@@ -32,14 +32,41 @@ async def doctor(cfg):
 
 def main():
     parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.')
-    parser.add_argument('command',nargs='?',choices=['run','doctor'],default='run')
+    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','backup','restore'],default='run')
     parser.add_argument('--brain',choices=['codex','claude'])
     parser.add_argument('--env-file',type=Path)
+    parser.add_argument('--admin-url-file',type=Path,help='Private file holding an operator database URL; never pass a URL on the command line')
+    parser.add_argument('--runtime-env-file',type=Path,default=Path.home()/'.config/brodar/runtime.env')
+    parser.add_argument('--role',default='brodar_runtime')
+    parser.add_argument('--archive',type=Path)
+    parser.add_argument('--output',type=Path)
+    parser.add_argument('--source',default='brodar')
+    parser.add_argument('--instance-id',default='brodar')
+    parser.add_argument('--storage-config',type=Path)
+    parser.add_argument('--source-storage-config',type=Path,help='Restore source, if different from destination storage')
+    parser.add_argument('--recovery-key-file',type=Path,help='Private recovery-key file; never commit it')
+    parser.add_argument('--backup-id')
     args=parser.parse_args()
     logging.basicConfig(level=logging.WARNING,format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.ERROR)
     cfg=Settings.load(env_file=args.env_file,brain=args.brain)
-    if args.command=='doctor':
+    if args.command in {'migrate','provision','import-history','export-history','backup','restore'}:
+        from .operator import database_command
+        print(json.dumps(asyncio.run(database_command(args)),indent=2))
+    elif args.command=='login':
+        from .brains.codex import child_environment
+        import subprocess
+        home=cfg.runtime_dir/cfg.brain
+        home.mkdir(mode=0o700,parents=True,exist_ok=True)
+        (home/'user').mkdir(mode=0o700,exist_ok=True)
+        env=child_environment(home)
+        if cfg.brain=='codex':argv=['codex','login','--device-auth']
+        else:
+            env.pop('CODEX_HOME',None)
+            env['CLAUDE_CONFIG_DIR']=str(home)
+            argv=['claude','auth','login']
+        raise SystemExit(subprocess.call(argv,env=env,cwd=str(home)))
+    elif args.command=='doctor':
         asyncio.run(doctor(cfg))
     else:
         cfg.require_run()

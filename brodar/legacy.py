@@ -10,12 +10,14 @@ import gzip
 import hashlib
 import json
 import os
+from datetime import datetime,timezone,timedelta
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from .postgres import Postgres
 from .scope import Scope
 from .store import digest, records
+from .redaction import scrub,scrub_object
 
 
 def identifier(value: str) -> str:
@@ -65,20 +67,31 @@ async def import_messages(db: Postgres, archive: dict, *, instance_id: str = 'br
     rows = sorted(archive['tables'].get('messages',[]),key=lambda r:(r['created_at'],r['id']))
     def insert():
         inserted = 0
-        for r in rows:
-            scope = Scope(0,int(r['chat_id']),instance_id=instance_id)
+        groups={}
+        imported_at=datetime.now(timezone.utc)
+        for sequence,r in enumerate(rows):
+            scope=Scope(0,int(r['chat_id']),instance_id=instance_id)
             mid = str(uuid5(NAMESPACE_URL,f'{scope.audience}:{source}:messages:{r["id"]}'))
             raw = json.dumps(r,default=str,sort_keys=True,ensure_ascii=False)
-            with db.transaction(scope.audience) as c:
+            text=scrub(r['content'])
+            groups.setdefault(scope.audience,[]).append({'id':mid,'role':r['role'],'content':text,
+                'legacy_timestamp':r['created_at'],'sender_id':r.get('user_id'),'source_id':str(r['id']),
+                'source_hash':digest(text),'received_at':(imported_at+timedelta(microseconds=sequence)).isoformat(),
+                'metadata':{'legacy_row':scrub_object(r),'legacy_row_sha256':digest(raw),
+                            'timestamp_timezone':'unknown','author_verified':False}})
+        for audience,batch in groups.items():
+            with db.transaction(audience) as c:
+                c.execute('INSERT INTO brodar_v2.audience_registry(audience,instance_id,chat_id) VALUES (%s,%s,%s) '
+                    'ON CONFLICT DO NOTHING',(audience,instance_id,int(audience.rsplit(":",1)[1])))
                 c.execute('INSERT INTO brodar_v2.messages '
-                          '(id,audience,role,content,legacy_timestamp,sender_id,source,source_id,source_hash,metadata) '
-                          'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) '
+                          '(id,audience,role,content,legacy_timestamp,sender_id,source,source_id,source_hash,metadata,received_at,changed_at) '
+                          'SELECT x.id,%s,x.role,x.content,x.legacy_timestamp,x.sender_id,%s,x.source_id,x.source_hash,x.metadata,x.received_at,x.received_at '
+                          'FROM jsonb_to_recordset(%s::jsonb) AS x(id uuid,role text,content text,legacy_timestamp text,'
+                          'sender_id bigint,source_id text,source_hash text,metadata jsonb,received_at timestamptz) '
+                          'WHERE NOT EXISTS (SELECT 1 FROM brodar_v2.forgotten_sources f WHERE f.audience=%s AND f.source=%s AND f.source_id=x.source_id) '
                           'ON CONFLICT(audience,source,source_id) DO NOTHING RETURNING id',
-                          (mid,scope.audience,r['role'],r['content'],r['created_at'],r.get('user_id'),
-                           source,str(r['id']),digest(r['content']),
-                           json.dumps({'legacy_row':r,'legacy_row_sha256':digest(raw),
-                                       'timestamp_timezone':'unknown','author_verified':False},ensure_ascii=False)))
-                inserted += c.fetchone() is not None
+                          (audience,source,json.dumps(batch,ensure_ascii=False),audience,source))
+                inserted+=len(c.fetchall())
         return {'source':source,'input_rows':len(rows),'inserted':inserted}
     return await db.run(insert)
 
@@ -96,9 +109,9 @@ async def verify_import(db: Postgres, archive: dict, *, instance_id: str = 'brod
                 found={row[4]:row for row in c.fetchall()}
                 for r in expected:
                     row=found.get(str(r['id']))
-                    if not row or row[0]!=r['content'] or row[1]!=r['created_at'] or row[2]!=r.get('user_id'):
+                    if not row or row[0]!=scrub(r['content']) or row[1]!=r['created_at'] or row[2]!=r.get('user_id'):
                         raise RuntimeError('Legacy import verification failed')
-                    if row[3]['legacy_row']!=r:
+                    if row[3]['legacy_row']!=scrub_object(r):
                         raise RuntimeError('Legacy metadata verification failed')
                     verified += 1
         return verified

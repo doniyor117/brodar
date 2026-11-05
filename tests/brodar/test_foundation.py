@@ -8,6 +8,7 @@ from brodar.brains.codex import child_environment
 from brodar.embeddings import EmbeddingError, GeminiEmbeddings
 from brodar.scope import Scope
 from brodar.store import context_path
+from brodar.redaction import scrub,scrub_object
 
 
 @pytest.mark.parametrize('path',['SYSTEM.md','prompts/brodar.md','context/../SYSTEM.md',
@@ -42,6 +43,17 @@ def test_provider_environment_does_not_inherit_service_secrets(monkeypatch,tmp_p
     assert not any(k in env for k in ['NEON_API_KEY','GOOGLE_AI_API_KEY','TELEGRAM_BOT_TOKEN','GITHUB_TOKEN','DATABASE_URL'])
     assert env['CODEX_HOME']==str(tmp_path)
     assert env['HOME']==str(tmp_path/'user')
+
+
+def test_credentials_are_scrubbed_from_text_and_nested_updates():
+    key='AIza'+'A'*35
+    token='123456789:'+('a'*35)
+    update={'message':{'text':f'please use {key}', 'caption':token},'id':42}
+    redacted=scrub_object(update)
+    assert key not in str(redacted) and token not in str(redacted)
+    assert redacted['id']==42
+    assert update['message']['text'].endswith(key)  # caller's object is not mutated
+    assert scrub('ordinary English, Uzbek and Русский stays intact')=='ordinary English, Uzbek and Русский stays intact'
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ CODEX_CONTROL_SCHEMA['required']=['action','reason']
 # Thread config alone does not establish a native-tool boundary on this build.
 DISABLED_FEATURES=('shell_tool','unified_exec','view_image','multi_agent','plugins','apps','hooks',
     'skill_mcp_dependency_install','browser_use','browser_use_external','browser_use_full_cdp_access',
-    'computer_use','in_app_browser','code_mode_host','image_generation')
+    'computer_use','in_app_browser','image_generation')
 
 
 def app_server_argv(binary):
@@ -50,7 +50,7 @@ def child_environment(home: Path, extra: dict[str,str] | None = None):
 class CodexBrain:
     def __init__(self, *, home: Path, cwd: Path, model: str, effort: str,
                  instructions: str, binary: str = 'codex', env: dict[str,str] | None = None,
-                 transport_factory=RpcProcess):
+                 mcp_url:str|None=None,transport_factory=RpcProcess):
         self.home,self.cwd = home,cwd
         self.model,self.effort,self.instructions = model,effort,instructions
         self.session_id = None
@@ -60,12 +60,22 @@ class CodexBrain:
         self._texts = {}
         self._waiter = None
         self._transport_closed = False
+        argv=app_server_argv(binary)
+        if mcp_url:
+            import json
+            argv.extend(['-c','mcp_servers.hamroh.url='+json.dumps(mcp_url),
+                         '-c','mcp_servers.hamroh.bearer_token_env_var="BRODAR_MCP_TOKEN"',
+                         '-c','mcp_servers.hamroh.default_tools_approval_mode="approve"'])
+        argv.extend(['-c','project_doc_max_bytes=0'])
         self.rpc = transport_factory(
-            app_server_argv(binary),
+            argv,
             env=child_environment(home,env),cwd=str(cwd),
             on_notification=self._notification,on_request=self._server_request)
 
     async def start(self, session_id: str | None = None):
+        self._transport_closed=False
+        self._completed.clear()
+        self._texts.clear()
         self.home.mkdir(parents=True,exist_ok=True,mode=0o700)
         (self.home/'user').mkdir(exist_ok=True,mode=0o700)
         self.cwd.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -81,7 +91,14 @@ class CodexBrain:
                     'features.shell_tool':False,'features.apply_patch_freeform':False,
                     'features.multi_agent':False,'features.js_repl':False}}
         if session_id:
-            result = await self.rpc.request('thread/resume',{**params,'threadId':session_id,'excludeTurns':True})
+            try:
+                result = await self.rpc.request('thread/resume',{**params,'threadId':session_id,'excludeTurns':True})
+            except RpcError as exc:
+                missing=any(marker in exc.message.lower() for marker in ['thread not found','no rollout found',
+                    'failed to load rollout','no conversation found','does not exist','not found'])
+                if not missing:raise
+                result=await self.rpc.request('thread/start',{**params,'environments':[],
+                                                            'allowProviderModelFallback':False})
         else:
             result = await self.rpc.request('thread/start',{**params,'environments':[],
                                                           'allowProviderModelFallback':False})

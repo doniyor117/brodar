@@ -15,6 +15,7 @@ class Settings:
     database_url:str=field(repr=False)
     telegram_token:str=field(repr=False)
     google_key:str=field(repr=False)
+    storage_config:Path|None=None
     allowed_chats:frozenset[int]=frozenset()
     owner_ids:frozenset[int]=frozenset({1000000001,1000000002})
     runtime_dir:Path=Path.home()/'.local/share/brodar'
@@ -37,6 +38,7 @@ class Settings:
                 database_url=values.get('BRODAR_DATABASE_URL',values.get('DATABASE_URL','')),
                 telegram_token=values.get('TELEGRAM_BOT_TOKEN',values.get('BRODAR_TEST_BOT_API_KEY','')),
                 google_key=values.get('GOOGLE_AI_API_KEY',values.get('GEMINI_API_KEY','')),
+                storage_config=Path(values.get('BRODAR_STORAGE_CONFIG',str(Path.home()/'.config/brodar/storage-production.json'))).expanduser(),
                 allowed_chats=ids(values.get('BRODAR_ALLOWED_CHATS','')),
                 owner_ids=ids(values.get('BRODAR_OWNER_IDS','1000000001,1000000002')),
                 runtime_dir=Path(values.get('BRODAR_RUNTIME_DIR',str(Path.home()/'.local/share/brodar'))).expanduser().resolve(),

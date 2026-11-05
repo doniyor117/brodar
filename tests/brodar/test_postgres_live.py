@@ -28,6 +28,7 @@ async def stores():
                 for table in ['memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages']:
                     c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(s.scope.audience,))
                 c.execute('DELETE FROM brodar_v2.poll_state WHERE bot_id=%s',(bot_id,))
+                c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(s.scope.audience,))
     await db.run(cleanup)
     await db.close()
 
@@ -85,3 +86,42 @@ async def test_vector_recall_and_stale_embedding_guard(stores):
     result=await a.search(' космос ',vector=vector,model='test-model')
     assert result[0]['content']==row['content']
     assert await b.search('astronomy',vector=vector,model='test-model')==[]
+
+
+@pytest.mark.asyncio
+async def test_consumer_takeover_reclaims_work_and_fences_previous_owner(stores):
+    from brodar.recovery import ConsumerLease
+    from brodar.runtime_store import RuntimeStore
+    a,_=stores
+    first=ConsumerLease(a.db,a.scope.bot_id)
+    second=ConsumerLease(a.db,a.scope.bot_id)
+    await first.acquire()
+    try:
+        with pytest.raises(RuntimeError,match='Another instance'):
+            await second.acquire()
+        old=RuntimeStore(a.db,a.scope,lease_owner=first.owner)
+        new=RuntimeStore(a.db,a.scope,lease_owner=second.owner)
+        await add(old,'recover this task')
+        claimed=await old.claim_inputs()
+        assert len(claimed)==1
+        def expire():
+            with a.db.transaction() as c:
+                c.execute("UPDATE brodar_v2.poll_state SET lease_until=now()-interval '1 second' WHERE bot_id=%s",(a.scope.bot_id,))
+        await a.db.run(expire)
+        await second.acquire()
+        with pytest.raises(PermissionError):await first.require()
+        with pytest.raises(PermissionError):await old.claim_inputs()
+        reclaimed=await new.claim_inputs()
+        assert reclaimed[0]['id']==claimed[0]['id'] and reclaimed[0]['attempts']==2
+        await old.finish_inputs([claimed[0]['id']])
+        def status():
+            with a.db.transaction(a.scope.audience,readonly=True) as c:
+                c.execute('SELECT status,lease_owner FROM brodar_v2.inbox WHERE id=%s',(str(claimed[0]['id']),))
+                return c.fetchone()
+        row=await a.db.run(status)
+        assert row[0]=='running' and str(row[1])==second.owner
+        await new.finish_inputs([claimed[0]['id']])
+        assert (await a.db.run(status))[0]=='done'
+    finally:
+        await first.release()
+        await second.release()

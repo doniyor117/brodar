@@ -9,6 +9,7 @@ from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 
 from .postgres import Postgres
 from .scope import Scope
+from .redaction import scrub,scrub_object
 
 
 def digest(text: str) -> str:
@@ -34,37 +35,53 @@ class RevisionConflict(RuntimeError):
 
 
 class ScopedStore:
-    def __init__(self, db: Postgres, scope: Scope):
+    def __init__(self, db: Postgres, scope: Scope, *, lease_owner=None):
         self.db = db
         self.scope = scope
+        self.lease_owner=lease_owner
 
     async def ingest(self, *, update_id: int, message_id: int, sender_id: int | None,
                      sender_name: str, text: str, timestamp, payload: dict,
                      reply_to_id: int | None = None, edited_at=None) -> tuple[str, bool]:
         """Archive + queue + polling cursor commit together before Telegram ack."""
+        text=scrub(text)
+        payload=scrub_object(payload)
         mid = str(uuid5(NAMESPACE_URL, f'{self.scope.audience}:telegram:{message_id}'))
         iid = str(uuid5(NAMESPACE_URL, f'telegram:{self.scope.bot_id}:{update_id}'))
 
         def op():
             with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
+                              (self.scope.bot_id,self.lease_owner))
+                    if c.fetchone() is None:raise PermissionError('Consumer lease expired before ingest')
+                c.execute('INSERT INTO brodar_v2.audience_registry(audience,instance_id,chat_id) VALUES (%s,%s,%s) '
+                          'ON CONFLICT DO NOTHING',(self.scope.audience,self.scope.instance_id,self.scope.chat_id))
                 c.execute('INSERT INTO brodar_v2.messages '
                           '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,'
                           'sent_at,reply_to_id,edited_at,source_id,source_hash) '
                           'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                           'ON CONFLICT(audience,source,source_id) DO UPDATE SET '
-                          'content=excluded.content,edited_at=excluded.edited_at,source_hash=excluded.source_hash '
+                          'content=excluded.content,edited_at=excluded.edited_at,source_hash=excluded.source_hash,changed_at=now() '
                           'WHERE excluded.edited_at IS NOT NULL AND '
-                          '(messages.edited_at IS NULL OR excluded.edited_at > messages.edited_at)',
+                          '(messages.edited_at IS NULL OR excluded.edited_at > messages.edited_at) RETURNING id',
                           (mid,self.scope.audience,self.scope.topic_id,message_id,sender_id,sender_name,
                            'user',text,timestamp,reply_to_id,edited_at,str(message_id),digest(text)))
+                changed=c.fetchone() is not None
                 c.execute('INSERT INTO brodar_v2.inbox(id,audience,topic_id,bot_id,update_id,message_id,payload) '
                           'VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(bot_id,update_id) DO NOTHING RETURNING id',
                           (iid,self.scope.audience,self.scope.topic_id,self.scope.bot_id,update_id,mid,
                            json.dumps(payload,default=str)))
                 new = c.fetchone() is not None
-                if edited_at is not None:
+                if edited_at is not None and changed:
                     c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='message' AND source_id=%s "
                               'AND content_hash<>%s',(self.scope.audience,mid,digest(text)))
+                    c.execute('UPDATE brodar_v2.memory_documents SET needs_review=true WHERE audience=%s AND id IN '
+                              '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                              (self.scope.audience,self.scope.audience,mid))
+                    c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='memory' AND source_id IN "
+                              '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                              (self.scope.audience,self.scope.audience,mid))
                 c.execute('INSERT INTO brodar_v2.poll_state(bot_id,next_update_id) VALUES (%s,%s) '
                           'ON CONFLICT(bot_id) DO UPDATE SET next_update_id='
                           'greatest(poll_state.next_update_id,excluded.next_update_id)',
@@ -82,12 +99,14 @@ class ScopedStore:
                 return list(reversed(records(c)))
         return await self.db.run(op)
 
-    async def memory_list(self, limit: int = 100):
+    async def memory_list(self, limit: int = 100,offset:int=0):
+        if offset<0:raise ValueError('Memory offset must be nonnegative')
         def op():
             with self.db.transaction(self.scope.audience,readonly=True) as c:
-                c.execute('SELECT id,path,revision,subject_ids,confidence,updated_at,left(content,180) AS preview '
+                c.execute('SELECT id,path,revision,subject_ids,confidence,updated_at,needs_review,'
+                          'CASE WHEN needs_review THEN NULL ELSE left(content,180) END AS preview '
                           'FROM brodar_v2.memory_documents WHERE audience=%s AND NOT deleted '
-                          'ORDER BY updated_at DESC LIMIT %s',(self.scope.audience,max(1,min(limit,200))))
+                          'ORDER BY updated_at DESC,id LIMIT %s OFFSET %s',(self.scope.audience,max(1,min(limit,200)),offset))
                 return records(c)
         return await self.db.run(op)
 
@@ -110,6 +129,8 @@ class ScopedStore:
         links enable correction/rollback, not a restricted vocabulary for notes.
         """
         path = context_path(path)
+        content=scrub(content)
+        reason=scrub(reason)
         if not content.strip() or len(content) > 100_000 or not reason.strip():
             raise ValueError('Provide nonempty content (up to 100000 characters) and a reason')
         source_ids = [str(UUID(x)) for x in source_ids or []]
@@ -133,7 +154,7 @@ class ScopedStore:
                           '(id,audience,path,content,revision,subject_ids,confidence) '
                           'VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(audience,path) DO UPDATE SET '
                           'content=excluded.content,revision=excluded.revision,subject_ids=excluded.subject_ids,'
-                          'confidence=excluded.confidence,deleted=false,updated_at=now()',
+                          'confidence=excluded.confidence,deleted=false,needs_review=false,updated_at=now()',
                           (docid,self.scope.audience,path,content,revision,subject_ids or [],confidence))
                 c.execute('INSERT INTO brodar_v2.memory_revisions '
                           '(id,audience,document_id,revision,content,deleted,reason) VALUES (%s,%s,%s,%s,%s,false,%s)',
@@ -181,7 +202,7 @@ class ScopedStore:
                 lexical = records(c)
                 c.execute("SELECT 'memory' AS kind,id,content,NULL::timestamptz AS sent_at,"
                           "NULL::text AS legacy_timestamp,NULL::bigint AS sender_id,path,NULL::text AS source,"
-                          "NULL::text AS source_id FROM brodar_v2.memory_documents WHERE audience=%s AND NOT deleted "
+                          "NULL::text AS source_id FROM brodar_v2.memory_documents WHERE audience=%s AND NOT deleted AND NOT needs_review "
                           "AND (to_tsvector('simple',content) @@ plainto_tsquery('simple',%s) OR content ILIKE %s) "
                           "ORDER BY updated_at DESC LIMIT 40",(self.scope.audience,query,'%'+query+'%'))
                 notes = records(c)
@@ -204,7 +225,7 @@ class ScopedStore:
                             c.execute("SELECT 'memory' AS kind,id,content,NULL::timestamptz AS sent_at,"
                                       "NULL::text AS legacy_timestamp,NULL::bigint AS sender_id,path,"
                                       "NULL::text AS source,NULL::text AS source_id FROM brodar_v2.memory_documents "
-                                      "WHERE audience=%s AND id=%s AND NOT deleted",(self.scope.audience,str(uid)))
+                                      "WHERE audience=%s AND id=%s AND NOT deleted AND NOT needs_review",(self.scope.audience,str(uid)))
                         semantic.extend(records(c))
                 combined = {}
                 for ranking in [lexical,notes,semantic]:
@@ -226,7 +247,7 @@ class ScopedStore:
         def op():
             with self.db.transaction(self.scope.audience) as c:
                 c.execute(f'SELECT content FROM brodar_v2.{table} WHERE audience=%s AND id=%s '+
-                          ('AND NOT deleted ' if kind=='memory' else '')+'FOR UPDATE',
+                          ('AND NOT deleted AND NOT needs_review ' if kind=='memory' else '')+'FOR UPDATE',
                           (self.scope.audience,str(UUID(source_id))))
                 row = c.fetchone()
                 if not row or row[0]!=text:

@@ -2,7 +2,7 @@
 
 A Telegram companion built on [Hamroh](https://github.com/Rustam-Z/hamroh), with selectable Codex and Claude brains, durable Neon history, and automatic conversational learning.
 
-**Implementation is in progress.** The current checkpoint includes both adapters, scoped storage and tools, polling, learning and embedding workers. Group rollout, recovery hardening, artifacts and moderation are still being validated. See [the tracker](docs/brodar/STATUS.md) for verified results and remaining work.
+**The owner-DM pilot is running; group rollout is in progress.** Both adapters, Neon history, automatic learning, hybrid recall, durable files, real PPTX delivery and encrypted backup/restore are implemented. Live Claude, group actions and sustained phone reliability still need validation. See [the tracker](docs/brodar/STATUS.md) for evidence and remaining work.
 
 ## Run
 
@@ -20,7 +20,7 @@ On Termux, existing native Python libraries can be reused with `python -m venv -
 
 Copy the setting names from [.env.brodar.example](.env.brodar.example) into an external private file, then use `brodar --env-file /path/to/private.env`. The default reads `~/.config/brodar/runtime.env` and `~/secrets/.env`. Never commit tokens, provider authentication, runtime state, or chat archives.
 
-The application uses a restricted database role. Apply versioned SQL migrations with an operator connection on a test branch first; the runtime does not migrate or use the owner role. The migration/provisioning CLI and deployment guide are being completed.
+The application uses a restricted database role. Apply versioned migrations with an operator connection on a test branch first; the runtime does not migrate or use the owner role. [Deployment instructions](docs/brodar/DEPLOYMENT.md) cover provisioning, history import, backups and the Termux supervisor.
 
 ## Conversation and learning
 
@@ -38,6 +38,6 @@ pytest tests/unit tests/brodar
 
 Browser tests require the optional browser package. Live Claude tests require `BRODAR_LIVE_CLAUDE_TESTS=1`; disposable Neon integration tests require `BRODAR_TEST_DATABASE_URL`. Mocked tests do not establish live provider or Telegram behavior.
 
-[Plan](docs/brodar/PLAN.md) · [Memory design](docs/brodar/SELF-EVOLUTION.md) · [Upstream Hamroh documentation](docs/UPSTREAM-HAMROH.md)
+[Plan](docs/brodar/PLAN.md) · [Memory design](docs/brodar/SELF-EVOLUTION.md) · [Code review](docs/brodar/CODE-REVIEW.md) · [Upstream Hamroh documentation](docs/UPSTREAM-HAMROH.md)
 
 Brodar retains Hamroh's Git history and MIT attribution. The historical `hamroh` command and Claude worker remain available; Brodar's shared runtime lives in `brodar/`.

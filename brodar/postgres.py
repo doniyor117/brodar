@@ -34,6 +34,9 @@ class Postgres:
                 host=u.hostname, port=u.port or 5432, database=unquote(u.path[1:]),
                 ssl_context=ssl.create_default_context(), timeout=30,
             )
+            # We issue explicit BEGIN below. Otherwise DB-API's implicit BEGIN
+            # precedes BEGIN READ ONLY and leaves the transaction writable.
+            self._conn.autocommit=True
         return self._conn
 
     @contextmanager
@@ -42,8 +45,7 @@ class Postgres:
             conn = self._connect()
             cur = conn.cursor()
             try:
-                cur.execute('BEGIN READ ONLY' if readonly else 'BEGIN')
-                cur.execute("SET LOCAL statement_timeout = '30s'")
+                cur.execute(('BEGIN READ ONLY' if readonly else 'BEGIN')+"; SET LOCAL statement_timeout = '30s'")
                 if audience is not None:
                     cur.execute("SELECT set_config('brodar.audience', %s, true)", (audience,))
                 yield cur

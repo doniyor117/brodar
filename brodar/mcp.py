@@ -5,9 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import functools
+import inspect
+import logging
+import time
 
 import uvicorn
 from mcp.server.fastmcp import Context,FastMCP
+from .artifacts import Slide
 
 
 class BearerAuth:
@@ -26,8 +31,37 @@ class BearerAuth:
 def result(value):return json.dumps(value,default=str,ensure_ascii=False)
 
 
+class AuditedMcp(FastMCP):
+    def __init__(self,broker):
+        self.broker=broker
+        super().__init__('hamroh',stateless_http=True,json_response=True,log_level='WARNING')
+
+    def add_tool(self,fn,*args,**kwargs):
+        signature=inspect.signature(fn)
+        @functools.wraps(fn)
+        async def audited(*values,**named):
+            start=time.monotonic()
+            cap=self.broker.capability
+            output=None
+            error=None
+            try:
+                output=await fn(*values,**named)
+                return output
+            except BaseException as exc:
+                error=type(exc).__name__+': '+str(exc)
+                raise
+            finally:
+                try:
+                    arguments=dict(signature.bind_partial(*values,**named).arguments)
+                    await self.broker.store.audit_tool(turn_id=cap.turn_id if cap else None,name=fn.__name__,
+                        arguments=arguments,result=output,error=error,duration_ms=int((time.monotonic()-start)*1000))
+                except Exception as exc:
+                    logging.getLogger('brodar.audit').error('Tool audit unavailable: %s',type(exc).__name__)
+        return super().add_tool(audited,*args,**kwargs)
+
+
 def build_tools(broker):
-    mcp=FastMCP('hamroh',stateless_http=True,json_response=True,log_level='WARNING')
+    mcp=AuditedMcp(broker)
 
     @mcp.tool()
     async def telegram_send_message(text:str,operation_id:str,reply_to_message_id:int|None=None)->str:
@@ -40,16 +74,22 @@ def build_tools(broker):
         return result(await broker.search(query,limit))
 
     @mcp.tool()
+    async def history_browse(before_id:str|None=None,sender_id:int|None=None,topic_id:int|None=None,limit:int=40)->str:
+        """Page backwards through available group/DM history. Start without a cursor; next_before_id continues. Unknown legacy authors stay unknown."""
+        broker.require()
+        return result(await broker.store.history_browse(before_id=before_id,sender_id=sender_id,topic_id=topic_id,limit=limit))
+
+    @mcp.tool()
     async def history_get(message_ids:list[str])->str:
         """Read original messages by archive UUID, from this audience only."""
         broker.require()
         return result(await broker.store.history_get(message_ids))
 
     @mcp.tool()
-    async def memory_list(limit:int=100)->str:
+    async def memory_list(limit:int=100,offset:int=0)->str:
         """Discover automatically learned context documents. No owner approval is needed for learning."""
         broker.require()
-        return result(await broker.store.memory_list(limit))
+        return result(await broker.store.memory_list(limit,offset))
 
     @mcp.tool()
     async def memory_read(path:str)->str:
@@ -71,24 +111,17 @@ def build_tools(broker):
     @mcp.tool()
     async def memory_history(path:str,limit:int=10)->str:
         """Inspect prior revisions and the current revision, including retired documents, for correction or undo."""
-        broker.require()
-        rows=await broker.store.memory_history(path,limit)
-        if rows:broker._reads[path]=rows[0]['current_revision']
-        return result(rows)
+        return result(await broker.memory_history(path,limit))
 
     @mcp.tool()
     async def memory_restore(path:str,revision:int,expected_revision:int,reason:str)->str:
         """Restore a prior contextual note after reading its history. Does not change the main prompt."""
-        broker.require()
-        if broker._reads.get(path)!=expected_revision:raise ValueError('Read memory history before restoring')
-        return result(await broker.store.memory_restore(path,revision,expected_revision=expected_revision,reason=reason))
+        return result(await broker.memory_restore(path,revision,expected_revision,reason))
 
     @mcp.tool()
     async def memory_forget(path:str,expected_revision:int)->str:
         """Erase a contextual note and its revision contents and vectors. Old chat messages are separate; this cannot undo a forget."""
-        broker.require()
-        if broker._reads.get(path)!=expected_revision:raise ValueError('Read context or history before forgetting')
-        return result(await broker.store.memory_forget(path,expected_revision=expected_revision))
+        return result(await broker.memory_forget(path,expected_revision))
 
     @mcp.tool()
     async def now()->str:
@@ -96,6 +129,55 @@ def build_tools(broker):
         from datetime import datetime,timezone
         broker.require()
         return datetime.now(timezone.utc).isoformat()
+
+    if broker.artifacts is not None:
+        @mcp.tool()
+        async def create_presentation(title:str,slides:list[Slide],operation_id:str,filename:str='presentation.pptx')->str:
+            """Create a real editable PPTX in durable scoped storage. Returns artifact_id; send it with telegram_send_document."""
+            return result(await broker.create_presentation(title,slides,filename,operation_id))
+
+        @mcp.tool()
+        async def create_file(filename:str,text:str,operation_id:str)->str:
+            """Create a durable text/code/CSV/Markdown file artifact. This does not write the host filesystem or configuration."""
+            return result(await broker.create_file(filename,text,operation_id))
+
+        @mcp.tool()
+        async def telegram_send_document(artifact_id:str,operation_id:str,caption:str='')->str:
+            """Deliver a stored artifact to the current chat/topic and confirm the actual Telegram message ID."""
+            return result(await broker.send_document(artifact_id,caption,operation_id))
+
+        @mcp.tool()
+        async def artifact_list(query:str='',limit:int=30)->str:
+            """Find shared files and previously generated artifacts in this audience by filename."""
+            broker.require()
+            return result(await broker.artifacts.list(query,limit))
+
+        @mcp.tool()
+        async def artifact_read(artifact_id:str,page_start:int=0,page_count:int=5):
+            """Read an audience-scoped file. Images are returned as vision input; PDFs are paginated. No arbitrary local paths."""
+            broker.require()
+            if page_start<0 or not 1<=page_count<=20:raise ValueError('Use page_start >= 0 and page_count 1..20')
+            row,body=await broker.artifacts.read(artifact_id)
+            if row['mime_type'] in {'image/png','image/jpeg','image/webp'}:
+                from mcp.server.fastmcp.utilities.types import Image
+                return Image(data=body,format={'image/png':'png','image/jpeg':'jpeg','image/webp':'webp'}[row['mime_type']])
+            if row['mime_type']=='application/pdf':
+                import io
+                from pypdf import PdfReader
+                reader=PdfReader(io.BytesIO(body))
+                end=min(len(reader.pages),page_start+page_count)
+                return result({'pages':[{'page':i+1,'text':reader.pages[i].extract_text()} for i in range(page_start,end)],
+                    'total_pages':len(reader.pages),'has_more':end<len(reader.pages)})
+            if row['mime_type']=='application/vnd.openxmlformats-officedocument.presentationml.presentation':
+                from .artifacts import read_presentation
+                deck=read_presentation(body);end=min(len(deck.slides),page_start+page_count)
+                return result({'slides':[{'number':i+1,'text':'\n'.join(shape.text for shape in deck.slides[i].shapes if shape.has_text_frame),
+                    'notes':deck.slides[i].notes_slide.notes_text_frame.text if deck.slides[i].has_notes_slide else ''}
+                    for i in range(page_start,end)],'total_slides':len(deck.slides),'has_more':end<len(deck.slides)})
+            if row['mime_type'].startswith('text/'):
+                text=body.decode('utf-8',errors='replace');start=page_start*10000;end=start+page_count*10000
+                return result({'text':text[start:end],'has_more':end<len(text),'total_characters':len(text)})
+            return result(broker.artifacts.public(row))
 
     return mcp
 

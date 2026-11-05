@@ -76,3 +76,23 @@ async def test_permissions_requests_are_declined(tmp_path):
                  instructions='fixed',transport_factory=FakeRpc)
     assert await b._server_request('item/commandExecution/requestApproval',{})=={'decision':'decline'}
     assert await b._server_request('item/fileChange/requestApproval',{})=={'decision':'decline'}
+
+
+@pytest.mark.asyncio
+async def test_missing_local_session_starts_new_thread_for_canonical_restore(tmp_path):
+    class MissingSession(FakeRpc):
+        async def request(self,method,params):
+            if method=='thread/resume':
+                self.requests.append((method,params))
+                raise RpcError(-32000,'no rollout found for thread')
+            return await super().request(method,params)
+    b=CodexBrain(home=tmp_path/'home',cwd=tmp_path/'work',model='model',effort='low',
+        instructions='fixed',transport_factory=MissingSession)
+    b._transport_closed=True
+    await b.start('missing-thread')
+    assert b._transport_closed is False
+    assert any(m=='thread/resume' for m,p in b.rpc.requests)
+    start=next(p for m,p in b.rpc.requests if m=='thread/start')
+    assert start['environments']==[] and start['allowProviderModelFallback'] is False
+    assert b.session_id=='thread'
+    await b.close()

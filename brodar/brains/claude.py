@@ -62,12 +62,17 @@ class ClaudeBrain:
     async def turn(self,text):
         if self._active:
             raise RuntimeError('A turn is already running')
+        if self.worker is None or not self.worker.is_running:
+            if self.worker is not None:await self.worker.stop()
+            await self.start(self.session_id)
         self._active=True
         try:
             await self.worker.send(text)
             r=await self.worker.wait_for_result()
             self.session_id=self.worker.session_id
             if r.aborted_reason or r.api_error:
+                if r.aborted_reason=='cancelled':
+                    return Outcome('interrupted',error='cancelled',session_id=self.session_id)
                 return Outcome('failed',error=r.aborted_reason or 'provider_api_error',session_id=self.session_id)
             if r.control is None:
                 return Outcome('failed',error='invalid_terminal_output',session_id=self.session_id,

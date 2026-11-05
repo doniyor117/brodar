@@ -9,8 +9,9 @@ from collections import deque
 
 
 class RpcError(RuntimeError):
-    def __init__(self, code):
+    def __init__(self, code, message=''):
         self.code = code
+        self.message=message
         super().__init__(f'app-server RPC failed ({code})')
 
 
@@ -79,7 +80,7 @@ class RpcProcess:
                         self.on_notification(msg['method'],msg.get('params',{}))
                 elif (f := self.pending.get(msg.get('id'))) is not None and not f.done():
                     if 'error' in msg:
-                        f.set_exception(RpcError(msg['error'].get('code','unknown')))
+                        f.set_exception(RpcError(msg['error'].get('code','unknown'),msg['error'].get('message','')))
                     else:
                         f.set_result(msg.get('result'))
         except asyncio.CancelledError:

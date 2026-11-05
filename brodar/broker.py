@@ -20,8 +20,10 @@ class TurnCapability:
 
 
 class ToolBroker:
-    def __init__(self,store,bot,*,embeddings=None):
+    def __init__(self,store,bot,*,embeddings=None,artifacts=None,delivery_guard=None):
         self.store,self.bot,self.embeddings=store,bot,embeddings
+        self.artifacts=artifacts
+        self.delivery_guard=delivery_guard
         self.capability=None
         self._reads={}
         self._delivery_lock=asyncio.Lock()
@@ -57,20 +59,31 @@ class ToolBroker:
                               (self.store.scope.audience,self.store.scope.topic_id,reply_to_message_id))
                     if c.fetchone() is None:raise ValueError('Reply target is not in this conversation')
             await self.store.db.run(validate_reply)
+        kwargs={'chat_id':self.store.scope.chat_id,'text':text}
+        if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
+        if reply_to_message_id is not None:kwargs['reply_to_message_id']=reply_to_message_id
+        async def send():return await self.bot.send_message(**kwargs)
+        return await self.deliver(cap,'send_message',{'text':text,'reply_to_message_id':reply_to_message_id},call_id,send)
+
+    async def deliver(self,cap,method,request,call_id,send):
+        if not call_id or len(call_id)>200:raise ValueError('Use an operation ID of 1 to 200 characters')
         async with self._delivery_lock:
             if self.capability is not cap:raise PermissionError('Turn was cancelled')
-            request={'text':text,'reply_to_message_id':reply_to_message_id}
-            receipt=await self.store.delivery_begin(cap.turn_id,call_id,'send_message',request)
-            if receipt['request']!=request or receipt['method']!='send_message':
+            receipt=await self.store.delivery_begin(cap.turn_id,call_id,method,request)
+            if self.capability is not cap:
+                if receipt['status']=='pending':
+                    await self.store.delivery_finish(receipt['id'],'failed',{'error':'cancelled_before_send'})
+                raise PermissionError('Turn was cancelled before delivery')
+            if receipt['request']!=request or receipt['method']!=method:
                 raise ValueError('Operation ID was already used for a different delivery')
             if receipt['status']=='sent':return receipt['response']
             if receipt['status']!='pending':
                 raise RuntimeError('Previous delivery is failed, in progress or uncertain; do not blindly replay it')
-            kwargs={'chat_id':self.store.scope.chat_id,'text':text}
-            if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
-            if reply_to_message_id is not None:kwargs['reply_to_message_id']=reply_to_message_id
+            if self.delivery_guard:
+                await self.delivery_guard()
+                if self.capability is not cap:raise PermissionError('Turn was cancelled before delivery')
             try:
-                sent=await self.bot.send_message(**kwargs)
+                sent=await send()
             except (BadRequest,Forbidden,RetryAfter) as exc:
                 await self.store.delivery_finish(receipt['id'],'failed',{'error':type(exc).__name__})
                 raise RuntimeError(f'Telegram rejected delivery ({type(exc).__name__})') from None
@@ -86,13 +99,49 @@ class ToolBroker:
             await self.store.delivery_finish(receipt['id'],'sent',result)
             return result
 
+    async def send_document(self,artifact_id,caption,call_id):
+        cap=self.require(visible=True)
+        if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
+        if len(caption)>1024:raise ValueError('Document captions allow at most 1024 characters')
+        row,body=await self.artifacts.read(artifact_id)
+        from telegram import InputFile
+        kwargs={'chat_id':self.store.scope.chat_id,'document':InputFile(body,filename=row['filename']),'caption':caption}
+        if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
+        async def send():return await self.bot.send_document(**kwargs)
+        return await self.deliver(cap,'send_document',{'artifact_id':artifact_id,'filename':row['filename'],'caption':caption},call_id,send)
+
+    async def create_presentation(self,title,slides,filename,operation_id):
+        cap=self.require(visible=True)
+        if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
+        if not 1<=len(slides)<=60:raise ValueError('Create 1 to 60 slides per presentation')
+        from .artifacts import presentation
+        from .store import digest
+        import json
+        request_hash=digest(json.dumps({'title':title,'filename':filename,'slides':[s.model_dump() for s in slides]},ensure_ascii=False,sort_keys=True))
+        body=await asyncio.to_thread(presentation,title,slides)
+        if self.capability is not cap:raise PermissionError('Turn was cancelled')
+        return await self.artifacts.put(turn_id=cap.turn_id,operation_id=operation_id,filename=filename,
+            mime='application/vnd.openxmlformats-officedocument.presentationml.presentation',body=body,
+            request_hash=request_hash,metadata={'title':title,'slides':len(slides)})
+
+    async def create_file(self,filename,text,operation_id):
+        cap=self.require(visible=True)
+        if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
+        if len(text)>1_000_000:raise ValueError('Text files allow up to 1000000 characters')
+        from pathlib import PurePosixPath
+        if PurePosixPath(filename).suffix.lower() in {'.pptx','.docx','.xlsx','.pdf','.zip','.png','.jpg','.jpeg','.webp','.mp4'}:
+            raise ValueError('This tool creates UTF-8 text; use a real format-specific creator for binary files')
+        from .store import digest
+        return await self.artifacts.put(turn_id=cap.turn_id,operation_id=operation_id,filename=filename,
+            mime='text/plain; charset=utf-8',body=text.encode(),request_hash=digest(filename+'\n'+text))
+
     async def search(self,query,limit=10):
         self.require()
         vector=None
         if self.embeddings:
             from .embeddings import EmbeddingError
             try:vector=await self.embeddings.embed(query,query=True)
-            except EmbeddingError:pass  # lexical search remains useful during quota/network failures
+            except (EmbeddingError,ValueError):pass  # lexical search remains useful during quota/network/size failures
         return await self.store.search(query,vector=vector,limit=limit)
 
     async def memory_read(self,path):
@@ -115,3 +164,26 @@ class ToolBroker:
         if self._reads.get(path)!=expected_revision:
             raise RevisionConflict('Read this context document before deleting')
         return await self.store.memory_delete(path,expected_revision=expected_revision,reason=reason)
+
+    async def memory_history(self,path,limit=10):
+        self.require()
+        rows=await self.store.memory_history(path,limit)
+        if rows:self._reads[path]=rows[0]['current_revision']
+        return rows
+
+    def require_read(self,path,expected_revision):
+        self.require()
+        if self._reads.get(path)!=expected_revision:
+            raise RevisionConflict('Read the current document or its history before changing it')
+
+    async def memory_restore(self,path,revision,expected_revision,reason):
+        self.require_read(path,expected_revision)
+        result=await self.store.memory_restore(path,revision,expected_revision=expected_revision,reason=reason)
+        self._reads[path]=result['revision']
+        return result
+
+    async def memory_forget(self,path,expected_revision):
+        self.require_read(path,expected_revision)
+        result=await self.store.memory_forget(path,expected_revision=expected_revision)
+        self._reads.pop(path,None)
+        return result

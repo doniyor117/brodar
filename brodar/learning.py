@@ -8,6 +8,33 @@ from .runtime_store import RuntimeStore
 
 
 class LearningStore(RuntimeStore):
+    async def context_notes(self,speaker_ids,limit=12):
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute('SELECT id,path,content,revision,subject_ids,confidence,updated_at '
+                    'FROM brodar_v2.memory_documents WHERE audience=%s AND NOT deleted AND NOT needs_review '
+                    'ORDER BY CASE WHEN subject_ids && %s::bigint[] THEN 0 ELSE 1 END,'
+                    "CASE WHEN path LIKE 'context/group/%%' OR path='context/overview.md' THEN 0 ELSE 1 END,"
+                    'updated_at DESC LIMIT %s',(self.scope.audience,list(speaker_ids),limit))
+                rows=records(c)
+                selected=[]
+                remaining=14000
+                for row in rows:
+                    if remaining<=0:break
+                    full=row['content'];row['content']=full[:min(3000,remaining)]
+                    row['truncated']=len(row['content'])<len(full)
+                    remaining-=len(row['content']);selected.append(row)
+                return selected
+        return await self.db.run(op)
+
+    async def has_index(self,model):
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute('SELECT EXISTS(SELECT 1 FROM brodar_v2.embeddings WHERE audience=%s AND model=%s)',
+                    (self.scope.audience,model))
+                return c.fetchone()[0]
+        return await self.db.run(op)
+
     async def memory_history(self,path,limit=10):
         path=context_path(path)
         def op():
@@ -49,10 +76,10 @@ class LearningStore(RuntimeStore):
                 state=records(c)
                 if state:
                     s=state[0]
-                    c.execute('SELECT * FROM brodar_v2.messages WHERE audience=%s AND (received_at,id)>(%s,%s::uuid) '
-                        'ORDER BY received_at,id LIMIT %s',(self.scope.audience,s['last_received_at'],str(s['last_id']),limit))
+                    c.execute('SELECT * FROM brodar_v2.messages WHERE audience=%s AND (changed_at,id)>(%s,%s::uuid) '
+                        'ORDER BY changed_at,id LIMIT %s',(self.scope.audience,s['last_received_at'],str(s['last_id']),limit))
                 else:
-                    c.execute('SELECT * FROM brodar_v2.messages WHERE audience=%s ORDER BY received_at,id LIMIT %s',
+                    c.execute('SELECT * FROM brodar_v2.messages WHERE audience=%s ORDER BY changed_at,id LIMIT %s',
                         (self.scope.audience,limit))
                 rows=records(c)
                 if not rows:return []
@@ -71,7 +98,7 @@ class LearningStore(RuntimeStore):
                 c.execute('INSERT INTO brodar_v2.reflection_state(audience,last_received_at,last_id,last_run_at) '
                     'VALUES (%s,%s,%s,now()) ON CONFLICT(audience) DO UPDATE SET '
                     'last_received_at=excluded.last_received_at,last_id=excluded.last_id,last_run_at=now()',
-                    (self.scope.audience,last_message['received_at'],str(last_message['id'])))
+                    (self.scope.audience,last_message['changed_at'],str(last_message['id'])))
         await self.db.run(op)
 
     async def index_candidates(self,model,limit=5):
@@ -84,7 +111,7 @@ class LearningStore(RuntimeStore):
                 rows=records(c)
                 if len(rows)<limit:
                     c.execute("SELECT m.id,m.content,'memory' AS kind FROM brodar_v2.memory_documents m WHERE m.audience=%s "
-                        "AND NOT m.deleted AND m.content<>'' AND NOT EXISTS (SELECT 1 FROM brodar_v2.embeddings e "
+                        "AND NOT m.deleted AND NOT m.needs_review AND m.content<>'' AND NOT EXISTS (SELECT 1 FROM brodar_v2.embeddings e "
                         "WHERE e.audience=m.audience AND e.source_id=m.id AND e.kind='memory' AND e.model=%s) "
                         "ORDER BY m.updated_at LIMIT %s",(self.scope.audience,model,limit-len(rows)))
                     rows.extend(records(c))
@@ -100,7 +127,7 @@ class LearningStore(RuntimeStore):
         def op():
             with self.db.transaction(self.scope.audience) as c:
                 c.execute(f'SELECT content FROM brodar_v2.{table} WHERE audience=%s AND id=%s '+
-                    ('AND NOT deleted ' if kind=='memory' else '')+'FOR UPDATE',(self.scope.audience,source_id))
+                    ('AND NOT deleted AND NOT needs_review ' if kind=='memory' else '')+'FOR UPDATE',(self.scope.audience,source_id))
                 row=c.fetchone()
                 if not row or row[0]!=text:return False
                 c.execute('DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind=%s AND source_id=%s AND model=%s',
@@ -113,6 +140,6 @@ class LearningStore(RuntimeStore):
         return await self.db.run(op)
 
 
-def chunks(text,size=3000,overlap=200):
+def chunks(text,size=1800,overlap=120):
     if size<=overlap or overlap<0:raise ValueError('Invalid chunk sizes')
     return [text[start:start+size] for start in range(0,len(text),size-overlap)]

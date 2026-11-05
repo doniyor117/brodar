@@ -5,18 +5,65 @@ from datetime import datetime,timezone
 from uuid import NAMESPACE_URL,uuid5
 
 from .store import ScopedStore,records,digest
+from .redaction import scrub,scrub_object
+from uuid import uuid4
 
 
 class RuntimeStore(ScopedStore):
+    async def history_browse(self,*,before_id=None,sender_id=None,topic_id=None,limit=40):
+        """Walk the archive without relying on semantic search finding a quote."""
+        from uuid import UUID
+        if before_id:before_id=str(UUID(before_id))
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                anchor=None
+                if before_id:
+                    c.execute('SELECT received_at,id FROM brodar_v2.messages WHERE audience=%s AND id=%s',
+                              (self.scope.audience,before_id))
+                    anchor=c.fetchone()
+                    if anchor is None:raise ValueError('History cursor is not in this audience')
+                filters=['audience=%s'];args=[self.scope.audience]
+                if anchor:filters.append('(received_at,id)<(%s,%s::uuid)');args.extend([anchor[0],str(anchor[1])])
+                if sender_id is not None:filters.append('sender_id=%s');args.append(sender_id)
+                if topic_id is not None:filters.append('topic_id=%s');args.append(topic_id)
+                args.append(max(1,min(limit,100))+1)
+                c.execute('SELECT id,topic_id,platform_message_id,sender_id,sender_name,role,content,sent_at,'
+                          'legacy_timestamp,reply_to_id,source,received_at FROM brodar_v2.messages WHERE '+
+                          ' AND '.join(filters)+' ORDER BY received_at DESC,id DESC LIMIT %s',tuple(args))
+                rows=records(c);has_more=len(rows)>max(1,min(limit,100))
+                rows=rows[:max(1,min(limit,100))]
+                return {'messages':list(reversed(rows)),'has_more':has_more,
+                        'next_before_id':str(rows[-1]['id']) if rows and has_more else None}
+        return await self.db.run(op)
+
+    async def audit_tool(self,*,turn_id,name,arguments,result,error,duration_ms):
+        arguments=scrub_object(arguments)
+        output=scrub_object(result)
+        def bounded(value):
+            encoded=json.dumps(value,default=str,ensure_ascii=False)
+            return encoded if len(encoded)<=64000 else json.dumps({'truncated':True,'preview':encoded[:60000]})
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                c.execute('INSERT INTO brodar_v2.tool_calls(id,audience,turn_id,name,arguments,result,error,duration_ms) '
+                    'VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s)',
+                    (str(uuid4()),self.scope.audience,turn_id,name,bounded(arguments),bounded(output),
+                     scrub(error)[:4000] if error else None,duration_ms))
+        await self.db.run(op)
+
     async def claim_inputs(self,limit=50):
         def op():
             with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now()',
+                              (self.scope.bot_id,self.lease_owner))
+                    if c.fetchone() is None:raise PermissionError('Telegram consumer lease is no longer active')
                 c.execute("UPDATE brodar_v2.inbox SET status='running',attempts=attempts+1,"
-                          "lease_until=now()+interval '15 minutes' WHERE id IN ("
+                          "lease_owner=%s,lease_until=now()+interval '15 minutes' WHERE id IN ("
                           "SELECT id FROM brodar_v2.inbox WHERE audience=%s AND topic_id=%s "
-                          "AND (status='pending' OR (status='running' AND lease_until<now())) "
+                          "AND (status='pending' OR (status='running' AND (lease_until<now() OR "
+                          "(%s::uuid IS NOT NULL AND lease_owner IS DISTINCT FROM %s::uuid)))) "
                           "ORDER BY update_id LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *",
-                          (self.scope.audience,self.scope.topic_id,max(1,min(limit,100))))
+                          (self.lease_owner,self.scope.audience,self.scope.topic_id,self.lease_owner,self.lease_owner,max(1,min(limit,100))))
                 return sorted(records(c),key=lambda r:r['update_id'])
         return await self.db.run(op)
 
@@ -25,8 +72,9 @@ class RuntimeStore(ScopedStore):
         def op():
             with self.db.transaction(self.scope.audience) as c:
                 c.execute('UPDATE brodar_v2.inbox SET status=%s,lease_until=NULL,error_code=%s '
-                          'WHERE audience=%s AND id=ANY(%s::uuid[])',
-                          ('pending' if retry else ('failed' if error else 'done'),error,self.scope.audience,[str(x) for x in ids]))
+                          'WHERE audience=%s AND id=ANY(%s::uuid[]) AND '
+                          '(%s::uuid IS NULL OR lease_owner=%s::uuid OR (status=\'pending\' AND lease_owner IS NULL))',
+                          ('pending' if retry else ('failed' if error else 'done'),error,self.scope.audience,[str(x) for x in ids],self.lease_owner,self.lease_owner))
         await self.db.run(op)
 
     async def session_get(self,provider,prompt_revision):
@@ -73,8 +121,10 @@ class RuntimeStore(ScopedStore):
                     c.execute('SELECT method,request FROM brodar_v2.deliveries WHERE audience=%s AND id=%s',
                               (self.scope.audience,str(uid)))
                     delivery=c.fetchone()
-                    if delivery and delivery[0]=='send_message':
+                    if delivery and delivery[0] in {'send_message','send_document'}:
                         request=delivery[1]
+                        text=request['text'] if delivery[0]=='send_message' else (
+                            request.get('caption','')+'\n[document: '+request['filename']+'; artifact_id: '+request['artifact_id']+']')
                         mid=str(uuid5(NAMESPACE_URL,f'{self.scope.audience}:telegram:{response["message_id"]}'))
                         c.execute('INSERT INTO brodar_v2.messages '
                                   '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,'
@@ -82,14 +132,14 @@ class RuntimeStore(ScopedStore):
                                   "VALUES (%s,%s,%s,%s,%s,'brodar','assistant',%s,%s,%s,%s,%s) "
                                   'ON CONFLICT(audience,source,source_id) DO NOTHING',
                                   (mid,self.scope.audience,self.scope.topic_id,response['message_id'],self.scope.bot_id,
-                                   request['text'],datetime.now(timezone.utc),request.get('reply_to_message_id'),
-                                   str(response['message_id']),digest(request['text'])))
+                                   text,datetime.now(timezone.utc),request.get('reply_to_message_id'),
+                                   str(response['message_id']),digest(text)))
         await self.db.run(op)
 
     async def delivery_receipts(self,turn_id):
         def op():
             with self.db.transaction(self.scope.audience,readonly=True) as c:
-                c.execute('SELECT id,tool_call_id,method,status,response FROM brodar_v2.deliveries '
+                c.execute('SELECT id,tool_call_id,method,status,response,request FROM brodar_v2.deliveries '
                           'WHERE audience=%s AND turn_id=%s ORDER BY created_at',
                           (self.scope.audience,str(turn_id)))
                 return records(c)
