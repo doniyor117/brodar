@@ -42,9 +42,10 @@ class ScopedStore:
 
     async def ingest(self, *, update_id: int, message_id: int, sender_id: int | None,
                      sender_name: str, text: str, timestamp, payload: dict,
-                     reply_to_id: int | None = None, edited_at=None) -> tuple[str, bool]:
+                     reply_to_id: int | None = None, edited_at=None,role:str='user') -> tuple[str, bool]:
         """Archive + queue + polling cursor commit together before Telegram ack."""
         text=scrub(text)
+        if role not in {'user','service'}:raise ValueError('Unsupported incoming message role')
         payload=scrub_object(payload)
         mid = str(uuid5(NAMESPACE_URL, f'{self.scope.audience}:telegram:{message_id}'))
         iid = str(uuid5(NAMESPACE_URL, f'telegram:{self.scope.bot_id}:{update_id}'))
@@ -73,7 +74,7 @@ class ScopedStore:
                           'WHERE excluded.edited_at IS NOT NULL AND '
                           '(messages.edited_at IS NULL OR excluded.edited_at > messages.edited_at) RETURNING id',
                           (mid,self.scope.audience,self.scope.topic_id,message_id,sender_id,sender_name,
-                           'user',text,timestamp,reply_to_id,edited_at,str(message_id),digest(text)))
+                           role,text,timestamp,reply_to_id,edited_at,str(message_id),digest(text)))
                 changed=c.fetchone() is not None
                 c.execute('INSERT INTO brodar_v2.inbox(id,audience,topic_id,bot_id,update_id,message_id,payload) '
                           'VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(bot_id,update_id) DO NOTHING RETURNING id',

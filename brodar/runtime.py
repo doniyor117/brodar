@@ -29,7 +29,7 @@ from .scope import Scope
 from .objects import ObjectStore
 from .artifacts import Artifacts
 from .recovery import ConsumerLease
-from .telegram_context import ordinary_message,public_payload
+from .telegram_context import ordinary_message,public_payload,describe_message
 from .moderation import requests as moderation_requests
 from .jobs import Reminders,input_requests,dispatch_reminder
 
@@ -484,12 +484,13 @@ async def run(cfg):
                         mid=str(uuid5(NAMESPACE_URL,f'{scope.audience}:telegram:{message.message_id}'))
                         conversations[scope.conversation].broker.revoke_request_ids([mid])
                     store=LearningStore(db,scope,lease_owner=lease.owner)
-                    text=message.text or message.caption or '[attachment received; no text]'
+                    text,service=describe_message(raw_message)
                     iid,new=await store.ingest(update_id=update.update_id,message_id=message.message_id,
                         sender_id=sender.id if sender else None,sender_name=sender.full_name if sender else 'anonymous sender',
                         text=text,timestamp=message.date,reply_to_id=message.reply_to_message.message_id if message.reply_to_message else None,
-                        edited_at=message.edit_date,payload=public_payload(raw))
-                    if new:
+                        edited_at=message.edit_date,payload=public_payload(raw),role='service' if service else 'user')
+                    if new and service:await store.finish_inputs([iid])
+                    if new and not service:
                         conversation=await get_conversation(scope)
                         if text.split('@',1)[0].strip()=='/cancel' and sender:
                             await conversation.cancel(sender.id)

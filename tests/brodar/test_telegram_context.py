@@ -1,6 +1,6 @@
 from telegram import Update
 
-from brodar.telegram_context import ordinary_message,public_payload
+from brodar.telegram_context import ordinary_message,public_payload,describe_message
 
 
 def test_new_sdk_unknown_recipient_fields_do_not_become_public_context():
@@ -17,3 +17,10 @@ def test_private_reply_payload_is_omitted_but_normal_text_remains():
     safe=public_payload(raw)
     assert safe['message']['text']=='ordinary public message'
     assert 'private reply text' not in str(safe)
+
+
+def test_service_events_do_not_masquerade_as_unreadable_attachments():
+    text,service=describe_message({'delete_chat_photo':True})
+    assert service and 'delete_chat_photo' in text and 'attachment' not in text
+    assert describe_message({'text':'yo','group_chat_created':False})==('yo',False)
+    assert describe_message({'sticker':{'emoji':'💀'},'delete_chat_photo':False})==('[sticker: 💀]',False)
