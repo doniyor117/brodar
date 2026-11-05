@@ -48,9 +48,11 @@ class ClaudeBrain:
 
     async def start(self,session_id=None):
         self.home.mkdir(mode=0o700,parents=True,exist_ok=True)
+        (self.home/'user').mkdir(mode=0o700,parents=True,exist_ok=True)
         self.cwd.mkdir(mode=0o700,parents=True,exist_ok=True)
         env=child_environment(self.home,self.env)
-        # Claude uses its own isolated HOME/CLAUDE_CONFIG_DIR, not Codex config.
+        # All conversations share one dedicated Claude auth store, while
+        # cwd, MCP config and session references remain conversation-specific.
         env.pop('CODEX_HOME',None)
         env['CLAUDE_CONFIG_DIR']=str(self.home)
         self.worker=self.worker_factory(dataclasses.replace(self.spec,session_id=session_id),self.config,

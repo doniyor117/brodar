@@ -2,7 +2,7 @@
 
 A Telegram companion built on [Hamroh](https://github.com/Rustam-Z/hamroh), with selectable Codex and Claude brains, durable Neon history, and automatic conversational learning.
 
-**The owner-DM pilot is running; group rollout is in progress.** Both adapters, Neon history, automatic learning, hybrid recall, durable files, real PPTX delivery, group-action tools, reminders, task checkpoints and encrypted backup/restore are implemented. Live Claude, real group behavior and sustained phone reliability still need validation. See [the tracker](docs/brodar/STATUS.md) for evidence and remaining work.
+**The spare-group pilot is running.** Both adapters, Neon history, automatic learning, hybrid recall, durable files, real PPTX delivery, group-action tools, reminders, task checkpoints and encrypted backup/restore are implemented. Live Claude, group behavior and sustained phone reliability still need validation. See [the tracker](docs/brodar/STATUS.md) for evidence and remaining work.
 
 ## Run
 

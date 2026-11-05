@@ -93,9 +93,6 @@ class Conversation:
             from .brains.claude import ClaudeBrain
             from hamroh.cc_worker.spec import CcSpawnSpec
             from hamroh.cc_worker.cc_schema import CONTROL_ACTION_SCHEMA
-            seed=self.cfg.runtime_dir/'claude'/'.credentials.json'
-            if seed.exists() and not (self.root/'.credentials.json').exists():
-                private_write(self.root/'.credentials.json',seed.read_text())
             private_write(self.root/'system.md',prompt)
             private_write(self.root/'terminal.schema.json',json.dumps(CONTROL_ACTION_SCHEMA))
             private_write(self.root/'mcp.json',json.dumps({'mcpServers':{'hamroh':{
@@ -105,7 +102,7 @@ class Conversation:
                 system_prompt_path=self.root/'system.md',mcp_config_path=self.root/'mcp.json',
                 json_schema_path=self.root/'terminal.schema.json',cc_logs_dir=None,
                 hamroh_tool_names=tuple(t.name for t in await self.mcp.mcp.list_tools()))
-            self.brain=ClaudeBrain(spec=spec,config=claude_worker_config(self.root),home=self.root,cwd=self.root/'work')
+            self.brain=ClaudeBrain(spec=spec,config=claude_worker_config(self.root),home=self.cfg.runtime_dir/'claude',cwd=self.root/'work')
         session=await self.store.session_get(self.cfg.brain,self.revision)
         try:
             await self.brain.start(session)
