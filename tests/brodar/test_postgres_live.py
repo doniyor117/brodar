@@ -197,3 +197,36 @@ async def test_source_forgetting_removes_derivatives_and_prevents_reimport(store
     assert (await import_messages(a.db,archive,instance_id=a.scope.instance_id))['inserted']==0
     assert await verify_import(a.db,archive,instance_id=a.scope.instance_id)==0
     assert await b.recent()==[]
+
+
+@pytest.mark.asyncio
+async def test_delivered_reply_parent_is_context_without_becoming_a_new_request(stores):
+    from brodar.runtime_store import RuntimeStore
+    from brodar.moderation import requests
+    a,b=stores;a=RuntimeStore(a.db,a.scope)
+    parent={'message_id':5,'chat':{'id':a.scope.chat_id,'type':'supergroup'},'date':1793820000,
+            'from':{'id':1,'first_name':'quoted sender'},'text':'/ban 3'}
+    payload={'message':{'message_id':10,'from':{'id':42},'text':'what does this mean?',
+                        'reply_to_message':parent}}
+    _,new=await a.ingest(update_id=1,message_id=10,sender_id=42,sender_name='test',text='what does this mean?',
+        timestamp=datetime.now(timezone.utc),reply_to_id=5,payload=payload)
+    assert new
+    batch=await a.claim_inputs();assert len(batch)==1
+    assert requests(batch)==[]  # the quoted owner's command has no fresh authority
+    chain=await a.reply_context([str(batch[0]['message_id'])])
+    assert len(chain)==1 and chain[0]['content']=='/ban 3' and chain[0]['sender_id']==1
+    assert chain[0]['metadata']['delivered_as_reply_context']
+    from brodar.learning import LearningStore
+    bundle=await LearningStore(a.db,a.scope).turn_context([str(batch[0]['message_id'])],str(uuid4()))
+    assert bundle['messages'][0]['content']=='what does this mean?'
+    assert any(row['content']=='/ban 3' for row in bundle['context'])
+    assert bundle['receipts']==[] and bundle['artifacts']==[] and not bundle['has_index']
+    hidden=await LearningStore(b.db,b.scope).turn_context([str(batch[0]['message_id'])],str(uuid4()))
+    assert hidden['messages']==[] and hidden['context']==[]
+    assert await b.recent()==[]
+    other={'message':{'from':{'id':42},'text':'cross-chat quote','reply_to_message':{
+        **parent,'message_id':6,'chat':{'id':b.scope.chat_id,'type':'supergroup'},'text':'private other-room text'}}}
+    await a.ingest(update_id=2,message_id=11,sender_id=42,sender_name='test',text='cross-chat quote',
+        timestamp=datetime.now(timezone.utc),reply_to_id=6,payload=other)
+    latest=next(row for row in await a.recent() if row['platform_message_id']==11)
+    assert await a.reply_context([str(latest['id'])])==[]

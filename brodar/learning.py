@@ -8,6 +8,45 @@ from .runtime_store import RuntimeStore
 
 
 class LearningStore(RuntimeStore):
+    async def turn_context(self,message_ids,turn_id,model=None):
+        """Fetch the foreground context in one remote transaction, not seven."""
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute("WITH RECURSIVE inputs AS (SELECT * FROM brodar_v2.messages WHERE audience=%s AND id=ANY(%s::uuid[])), "
+                    "chain AS (SELECT m.*,0 AS depth,ARRAY[m.id] AS path FROM inputs m UNION ALL "
+                    "SELECT p.*,c.depth+1,c.path||p.id FROM chain c JOIN brodar_v2.messages p "
+                    "ON p.audience=c.audience AND p.platform_message_id=c.reply_to_id WHERE c.depth<8 AND NOT p.id=ANY(c.path)) "
+                    "SELECT jsonb_build_object("
+                    "'messages',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM inputs ORDER BY received_at,id) t),"
+                    "'context',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT * FROM brodar_v2.messages WHERE audience=%s AND topic_id=%s "
+                    "AND id NOT IN (SELECT id FROM inputs) ORDER BY received_at DESC,id DESC LIMIT 35) t),"
+                    "'parents',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT DISTINCT ON(id) * FROM chain WHERE depth>0 ORDER BY id,depth) t),"
+                    "'notes',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id,path,left(content,3000) AS content,"
+                    "length(content)>3000 AS truncated,revision,subject_ids,confidence,updated_at FROM brodar_v2.memory_documents "
+                    "WHERE audience=%s AND NOT deleted AND NOT needs_review ORDER BY CASE WHEN subject_ids && "
+                    "ARRAY(SELECT sender_id FROM inputs WHERE sender_id IS NOT NULL) THEN 0 ELSE 1 END,"
+                    "CASE WHEN path LIKE 'context/group/%%' OR path='context/overview.md' THEN 0 ELSE 1 END,updated_at DESC LIMIT 12) t),"
+                    "'receipts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id,tool_call_id,method,status,response,request "
+                    "FROM brodar_v2.deliveries WHERE audience=%s AND turn_id=%s ORDER BY created_at) t),"
+                    "'artifacts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id AS artifact_id,filename "
+                    "FROM brodar_v2.artifacts WHERE audience=%s AND turn_id=%s) t),"
+                    "'has_index',EXISTS(SELECT 1 FROM brodar_v2.embeddings WHERE audience=%s AND model=%s))",
+                    (self.scope.audience,message_ids,self.scope.audience,self.scope.topic_id,self.scope.audience,
+                     self.scope.audience,str(turn_id),self.scope.audience,str(turn_id),self.scope.audience,model))
+                bundle=c.fetchone()[0]
+                bundle['context'].reverse()
+                seen={row['id'] for row in bundle['messages']+bundle['context']}
+                for parent in bundle.pop('parents'):
+                    if parent['id'] not in seen:bundle['context'].append(parent);seen.add(parent['id'])
+                remaining=14000;notes=[]
+                for note in bundle['notes']:
+                    if remaining<=0:break
+                    if len(note['content'])>remaining:note['truncated']=True
+                    note['content']=note['content'][:remaining];remaining-=len(note['content']);notes.append(note)
+                bundle['notes']=notes
+                return bundle
+        return await self.db.run(op)
+
     async def context_notes(self,speaker_ids,limit=12):
         def op():
             with self.db.transaction(self.scope.audience,readonly=True) as c:

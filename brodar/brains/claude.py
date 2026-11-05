@@ -12,7 +12,7 @@ import os
 
 from hamroh.cc_worker import CcWorker
 
-from .base import Outcome
+from .base import Outcome,terminal
 from .codex import child_environment
 
 
@@ -77,6 +77,8 @@ class ClaudeBrain:
                     return Outcome('interrupted',error='cancelled',session_id=self.session_id)
                 return Outcome('failed',error=r.aborted_reason or 'provider_api_error',session_id=self.session_id)
             if r.control is None:
+                plain='\n'.join(r.text_blocks)
+                if plain.strip().upper()=='[SILENT]':return terminal(plain,self.session_id)
                 return Outcome('failed',error='invalid_terminal_output',session_id=self.session_id,
                                internal_text='\n'.join(r.text_blocks))
             return Outcome('completed',r.control.action,r.control.reason or '',session_id=self.session_id)

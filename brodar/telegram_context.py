@@ -1,5 +1,17 @@
 """Visibility checks use API fields, including fields newer than the SDK."""
 
+import re
+
+_NAMES=re.compile(r'(?<!\w)(?:brodar(?:\s+simon)?|simon(?:\s+bro)?|samy)(?!\w)',re.I)
+
+
+def addressed(message,bot_id,username):
+    text=message.get('text') or message.get('caption') or ''
+    mention=bool(username and re.search(r'@'+re.escape(username)+r'(?!\w)',text,re.I))
+    reply=(message.get('reply_to_message') or {}).get('from') or {}
+    return bool((message.get('chat') or {}).get('type')=='private' or mention or
+                reply.get('id')==bot_id or _NAMES.search(text))
+
 
 def ordinary_message(message):
     # Recipient-only, business and guest contexts can share a numeric chat ID

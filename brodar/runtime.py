@@ -29,7 +29,8 @@ from .scope import Scope
 from .objects import ObjectStore
 from .artifacts import Artifacts
 from .recovery import ConsumerLease
-from .telegram_context import ordinary_message,public_payload,describe_message
+from .telegram_context import ordinary_message,public_payload,describe_message,addressed
+from .presence import TypingPresence
 from .moderation import requests as moderation_requests
 from .jobs import Reminders,input_requests,dispatch_reminder
 
@@ -58,9 +59,11 @@ def claude_worker_config(root):
 
 
 class Conversation:
-    def __init__(self,cfg,store,bot,embeddings,semaphore,objects=None,delivery_guard=None):
+    def __init__(self,cfg,store,bot,embeddings,semaphore,objects=None,delivery_guard=None,presence=None):
         self.cfg,self.store,self.bot,self.embeddings=cfg,store,bot,embeddings
         self.semaphore=semaphore
+        self.presence=presence
+        self._saved_session=None
         self.broker=ToolBroker(store,bot,embeddings=embeddings,artifacts=Artifacts(store,objects) if objects else None,
                                delivery_guard=delivery_guard,owner_ids=getattr(cfg,'owner_ids',()))
         self.mcp=ScopedMcpServer(self.broker)
@@ -71,6 +74,7 @@ class Conversation:
         self.task=None
         self.inflight=[]
         self._steer_lock=asyncio.Lock()
+        self._turn_lock=asyncio.Lock()
         self._accept_steer=False
         self._last_ambient=0
         self._cancelled=False
@@ -107,6 +111,7 @@ class Conversation:
         try:
             await self.brain.start(session)
             if self.brain.session_id:await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
+            self._saved_session=self.brain.session_id
         except BaseException:
             await self.brain.close()
             await self.mcp.close()
@@ -149,6 +154,15 @@ class Conversation:
         except Exception as exc:log.warning('Interrupt transport failed: %s',type(exc).__name__)
         return True
 
+    async def pause_reflection(self):
+        cap=self.broker.capability
+        if cap is not None and cap.mode=='reflection':
+            self.broker.end()
+            try:await self.brain.interrupt()
+            except Exception as exc:
+                log.warning('Background turn interrupt failed: %s',type(exc).__name__)
+                await self.brain.close()
+
     async def loop(self):
         while True:
             try:await asyncio.wait_for(self.wake.wait(),30)
@@ -172,6 +186,9 @@ class Conversation:
             self._last_ambient=time.monotonic()
 
     async def process(self):
+        async with self._turn_lock:await self._process_guarded()
+
+    async def _process_guarded(self):
         self._turn_id=None
         try:
             await self._process()
@@ -189,11 +206,11 @@ class Conversation:
         finally:
             self.broker.end()
             self.inflight=[]
+            if self.presence and not self.wake.is_set():await self.presence.stop(self.store.scope)
 
     async def materialize(self,batch):
         if self.broker.artifacts is None:return
         from .redaction import scrub
-        from .store import digest
         for row in batch:
             payload=row['payload'];message=payload.get('message') or payload.get('edited_message') or {}
             document=message.get('document');photos=message.get('photo') or []
@@ -214,13 +231,10 @@ class Conversation:
                     metadata={'source':'telegram','message_id':message['message_id']})
             text=scrub(message.get('text') or message.get('caption') or '')
             text+='\n[attachment: '+artifact['filename']+'; artifact_id: '+artifact['artifact_id']+']'
-            def update():
-                with self.store.db.transaction(self.store.scope.audience) as c:
-                    c.execute('UPDATE brodar_v2.messages SET content=%s,source_hash=%s WHERE audience=%s AND id=%s',
-                        (text,digest(text),self.store.scope.audience,str(row['message_id'])))
-            await self.store.db.run(update)
+            await self.store.attach_content(str(row['message_id']),text)
 
     async def _process(self):
+        prep_started=time.monotonic()
         batch=await self.store.claim_inputs()
         if not batch:return
         self.inflight=list(batch)
@@ -239,12 +253,10 @@ class Conversation:
             await self.store.finish_inputs([r['id'] for r in self.inflight],error='cancelled',job_id=self._turn_id)
             return
         ids=[str(r['message_id']) for r in batch]
-        messages=await self.store.history_get(ids)
-        recent=await self.store.recent(35)
-        context=[m for m in recent if str(m['id']) not in set(ids)]
-        notes=await self.store.context_notes({m['sender_id'] for m in messages if m.get('sender_id')})
+        bundle=await self.store.turn_context(ids,self._turn_id,self.embeddings.model if self.embeddings else None)
+        messages,context,notes=bundle['messages'],bundle['context'],bundle['notes']
         query='\n'.join(m['content'] for m in messages)[-1800:]
-        if self.embeddings and len(query)>=20 and await self.store.has_index(self.embeddings.model):
+        if self.embeddings and len(query)>=20 and bundle['has_index']:
             try:
                 vector=await self.embeddings.embed(query,query=True)
                 recall=await self.store.search(query,vector=vector,limit=6)
@@ -256,26 +268,30 @@ class Conversation:
                         notes.append(item)
             except (EmbeddingError,ValueError):pass
         turn_id=self._turn_id
-        prior=await self.store.delivery_receipts(turn_id)
+        prior=bundle['receipts']
         if any(r['status'] in {'sending','uncertain'} for r in prior):
             await self.store.finish_inputs([r['id'] for r in batch],error='previous_delivery_uncertain',job_id=turn_id)
             return
         payload=envelope(messages,context=context,notes=notes,receipts=prior)
-        artifacts=await self.store.work_artifacts(turn_id)
+        artifacts=bundle['artifacts']
         if work['checkpoint'] or artifacts:
             from xml.sax.saxutils import escape
             payload+='\n<task_progress>'+escape(json.dumps({'checkpoint':work['checkpoint'],'artifacts':artifacts},default=str))+'</task_progress>'
         outcome=None
+        receipts=prior
+        prep_seconds=time.monotonic()-prep_started
+        if prep_seconds>10:log.warning('Slow foreground preparation: %.1f seconds',prep_seconds)
         try:
             for continuation in range(4):
                 if self._cancelled:break
                 self._accept_steer=True
                 outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),timeout=600)
                 async with self._steer_lock:self._accept_steer=False
-                if self.brain.session_id:
+                if self.brain.session_id and self.brain.session_id!=self._saved_session:
                     await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
-                receipts=await self.store.delivery_receipts(turn_id)
-                artifacts=await self.store.work_artifacts(turn_id)
+                    self._saved_session=self.brain.session_id
+                state=await self.store.work_state(turn_id)
+                receipts,artifacts=state['receipts'],state['artifacts']
                 if outcome.status!='completed':break
                 if outcome.action=='stop' and not any(r['status']=='sent' for r in receipts):
                     payload='No successful public delivery exists for this turn. Complete the requested work through the available tools, or explicitly skip if a reply is unnecessary.'
@@ -286,7 +302,6 @@ class Conversation:
                     continue
                 if outcome.action!='heartbeat':break
                 payload='Continue the unfinished task. Finish through the actual tools. Do not repeat already delivered messages.'
-            receipts=await self.store.delivery_receipts(turn_id)
             done=outcome is not None and outcome.status=='completed' and ((outcome.action=='skip' and not undelivered_artifacts(artifacts,receipts)) or
                 (outcome.action=='stop' and any(r['status']=='sent' for r in receipts) and
                  not undelivered_artifacts(artifacts,receipts)))
@@ -320,6 +335,7 @@ class Conversation:
 
     async def close(self):
         self.broker.end()
+        if self.presence:await self.presence.stop(self.store.scope)
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task,return_exceptions=True)
@@ -327,6 +343,9 @@ class Conversation:
         await self.mcp.close()
 
     async def reflect(self):
+        async with self._turn_lock:await self._reflect()
+
+    async def _reflect(self):
         batch=await self.store.reflection_batch()
         if not batch:return
         # Bound each context presentation and only advance over presented rows.
@@ -347,8 +366,9 @@ class Conversation:
             outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),600)
             if outcome.status=='completed' and outcome.action in {'skip','stop'}:
                 await self.store.reflection_finish(selected[-1])
-            if self.brain.session_id:
+            if self.brain.session_id and self.brain.session_id!=self._saved_session:
                 await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
+                self._saved_session=self.brain.session_id
         except asyncio.TimeoutError:
             self.broker.end()
             await self.brain.close()
@@ -364,20 +384,24 @@ async def run(cfg):
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise RuntimeError('A Brodar process is already using this runtime directory') from None
     db=Postgres(cfg.database_url)
+    chat_db=Postgres(cfg.database_url)
+    learning_db=Postgres(cfg.database_url)
+    jobs_db=Postgres(cfg.database_url)
     embeddings=GeminiEmbeddings(cfg.google_key) if cfg.google_key else None
     bot=Bot(cfg.telegram_token)
+    presence=TypingPresence(bot)
     objects=ObjectStore.from_file(cfg.storage_config)
     conversations={}
     creating={}
-    semaphore=asyncio.Semaphore(1)
+    semaphore=asyncio.Semaphore(cfg.max_concurrent_turns)
     lease=None
 
     async def get_conversation(scope):
         key=scope.conversation
         if key not in conversations:
             async def create():
-                conversation=Conversation(cfg,LearningStore(db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,objects,
-                                          delivery_guard=lease.require)
+                conversation=Conversation(cfg,LearningStore(chat_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,objects,
+                                          delivery_guard=lease.require,presence=presence)
                 await conversation.start()
                 conversations[key]=conversation
                 return conversation
@@ -392,7 +416,7 @@ async def run(cfg):
         while True:
             for chat_id in cfg.allowed_chats:
                 scope=Scope(bot_id,chat_id,instance_id=cfg.instance_id)
-                store=LearningStore(db,scope)
+                store=LearningStore(learning_db,scope)
                 if embeddings:
                     try:
                         for row in await store.index_candidates(embeddings.model):
@@ -404,7 +428,7 @@ async def run(cfg):
                     except Exception as exc:log.warning('Index maintenance deferred: %s',type(exc).__name__)
                 try:
                     batch=await store.reflection_batch()
-                    if batch:
+                    if batch and not semaphore.locked() and not any(c.wake.is_set() or c.inflight for c in conversations.values()):
                         async with semaphore:
                             conversation=await get_conversation(scope)
                             await conversation.reflect()
@@ -444,7 +468,7 @@ async def run(cfg):
                 with db.transaction(scope.audience,readonly=True) as c:
                     c.execute("SELECT DISTINCT topic_id FROM brodar_v2.inbox WHERE audience=%s AND status IN ('pending','running')",(scope.audience,))
                     return [r[0] for r in c.fetchall()]
-            for topic in await db.run(pending_topics):
+            for topic in sorted(set(await db.run(pending_topics))|{0}):
                 await get_conversation(dataclasses.replace(scope,topic_id=topic))
         log.warning('Brodar polling as @%s with %s (%s)',me.username,cfg.brain,cfg.model)
         maintenance=asyncio.create_task(maintain(me.id),name='brodar-learning')
@@ -452,12 +476,12 @@ async def run(cfg):
             while True:
                 for chat_id in cfg.allowed_chats:
                     scope=Scope(me.id,chat_id,instance_id=cfg.instance_id)
-                    store=LearningStore(db,scope,lease_owner=lease.owner)
+                    store=LearningStore(jobs_db,scope,lease_owner=lease.owner)
                     reminders=Reminders(store)
                     try:
                         for job in await reminders.claim():
                             topic=dataclasses.replace(scope,topic_id=job['topic_id'])
-                            current=LearningStore(db,topic,lease_owner=lease.owner)
+                            current=LearningStore(jobs_db,topic,lease_owner=lease.owner)
                             status=await dispatch_reminder(job,current,bot,lease.require)
                             if status!='done':log.warning('Reminder delivery status: %s',status)
                     except Exception as exc:log.warning('Reminder scheduler deferred: %s',type(exc).__name__)
@@ -471,23 +495,32 @@ async def run(cfg):
                 await asyncio.sleep(3)
                 continue
             for update in updates:
+                persisted=False
                 message=update.effective_message
                 raw=update.to_dict()
                 raw_message=raw.get('message') or raw.get('edited_message') or {}
                 if message is not None and message.chat_id in cfg.allowed_chats and ordinary_message(raw_message):
                     sender=message.from_user if message.sender_chat is None else None
                     scope=Scope(me.id,message.chat_id,message.message_thread_id or 0,cfg.instance_id)
+                    text,service=describe_message(raw_message)
+                    direct=addressed(raw_message,me.id,me.username)
+                    if direct and not service and not (sender and sender.is_bot):presence.start(scope)
                     if message.edit_date is not None and scope.conversation in conversations:
                         mid=str(uuid5(NAMESPACE_URL,f'{scope.audience}:telegram:{message.message_id}'))
                         conversations[scope.conversation].broker.revoke_request_ids([mid])
                     store=LearningStore(db,scope,lease_owner=lease.owner)
-                    text,service=describe_message(raw_message)
                     iid,new=await store.ingest(update_id=update.update_id,message_id=message.message_id,
                         sender_id=sender.id if sender else None,sender_name=sender.full_name if sender else 'anonymous sender',
                         text=text,timestamp=message.date,reply_to_id=message.reply_to_message.message_id if message.reply_to_message else None,
                         edited_at=message.edit_date,payload=public_payload(raw),role='service' if service else 'user')
+                    persisted=True
                     if new and service:await store.finish_inputs([iid])
+                    if not new and direct:
+                        existing=conversations.get(scope.conversation)
+                        if existing is None or (not existing.inflight and not existing.wake.is_set()):await presence.stop(scope)
                     if new and not service:
+                        if not (sender and sender.is_bot):
+                            for current in list(conversations.values()):await current.pause_reflection()
                         conversation=await get_conversation(scope)
                         if text.split('@',1)[0].strip()=='/cancel' and sender:
                             await conversation.cancel(sender.id)
@@ -495,8 +528,6 @@ async def run(cfg):
                         elif sender and sender.is_bot:
                             await store.finish_inputs([iid])  # context retained; no bot-to-bot reply loop
                         else:
-                            direct=bool(message.chat.type=='private' or (me.username and '@'+me.username.lower() in text.lower()) or
-                                (message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id==me.id))
                             await conversation.signal(direct=direct)
                 elif message is not None:
                     if not ordinary_message(raw_message):log.warning('Recipient-scoped Telegram input omitted from ordinary chat history')
@@ -508,7 +539,7 @@ async def run(cfg):
                         c.execute('UPDATE brodar_v2.poll_state SET next_update_id=greatest(next_update_id,%s) '
                             'WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() RETURNING bot_id',(offset,me.id,lease.owner))
                         if c.fetchone() is None:raise PermissionError('Consumer lease expired before cursor commit')
-                await db.run(advance)
+                if not persisted:await db.run(advance)
     finally:
         if scheduler:
             scheduler.cancel()
@@ -520,9 +551,13 @@ async def run(cfg):
             maintenance.cancel()
             await asyncio.gather(maintenance,return_exceptions=True)
         await asyncio.gather(*(c.close() for c in conversations.values()),return_exceptions=True)
+        await presence.close()
         await bot.shutdown()
         if embeddings:await embeddings.close()
         if objects:await objects.close()
         if lease:await lease.release()
         await db.close()
+        await chat_db.close()
+        await learning_db.close()
+        await jobs_db.close()
         lock.close()

@@ -10,12 +10,14 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import threading
 import time
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--daemon',action='store_true',help='Detach the service from the launching terminal')
     parser.add_argument('--backup-admin-file',type=Path)
     parser.add_argument('--backup-storage-file',type=Path)
     parser.add_argument('--backup-key-file',type=Path)
@@ -27,6 +29,14 @@ def main():
     repo=Path(__file__).resolve().parents[1]
     state=Path(os.environ.get('BRODAR_RUNTIME_DIR',Path.home()/'.local/share/brodar'))
     state.mkdir(mode=0o700,parents=True,exist_ok=True)
+    if args.daemon:
+        os.umask(0o077)
+        with (state/'supervisor-console.log').open('a') as output:
+            child=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),
+                *[value for value in sys.argv[1:] if value!='--daemon']],cwd=repo,
+                stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+        print('Spawned detached Brodar supervisor pid='+str(child.pid))
+        return
     lock=(state/'supervisor.lock').open('w')
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise SystemExit('Brodar supervisor is already running')

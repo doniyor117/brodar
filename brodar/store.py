@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import PurePosixPath
+from datetime import datetime,timezone
 from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 
 from .postgres import Postgres
@@ -65,6 +66,40 @@ class ScopedStore:
                               'ON CONFLICT(bot_id) DO UPDATE SET next_update_id=greatest(poll_state.next_update_id,excluded.next_update_id)',
                               (self.scope.bot_id,update_id+1))
                     return iid,False
+                # Telegram may supply an older quoted parent that never reached
+                # the bot as an update. Archive it as context, never as a fresh
+                # request or a source of tool authority.
+                message=payload.get('message') or payload.get('edited_message') or {}
+                parent=message.get('reply_to_message') or {}
+                parent_id=parent.get('message_id')
+                parent_chat=(parent.get('chat') or {}).get('id',self.scope.chat_id)
+                if parent_id and parent_chat==self.scope.chat_id and not parent.get('private_context_omitted'):
+                    from .telegram_context import describe_message,ordinary_message
+                    if ordinary_message(parent):
+                        parent_text,parent_service=describe_message(parent)
+                        author=parent.get('from') or {}
+                        parent_sender=None if parent.get('sender_chat') else author.get('id')
+                        parent_role='service' if parent_service else ('assistant' if parent_sender==self.scope.bot_id else 'user')
+                        def date(value):
+                            try:
+                                if isinstance(value,datetime):return value
+                                if isinstance(value,(int,float)):return datetime.fromtimestamp(value,timezone.utc)
+                                if isinstance(value,str):
+                                    parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
+                                    return parsed if parsed.tzinfo else None
+                            except (ValueError,OverflowError,OSError):pass
+                            return None
+                        parent_topic=parent.get('message_thread_id')
+                        c.execute('INSERT INTO brodar_v2.messages '
+                            '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,sent_at,edited_at,source_id,source_hash,metadata) '
+                            'SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb WHERE NOT EXISTS '
+                            "(SELECT 1 FROM brodar_v2.forgotten_sources WHERE audience=%s AND source='telegram' AND source_id=%s) "
+                            'ON CONFLICT(audience,source,source_id) DO NOTHING',
+                            (str(uuid5(NAMESPACE_URL,f'{self.scope.audience}:telegram:{parent_id}')),self.scope.audience,
+                             self.scope.topic_id if parent_topic is None else parent_topic,parent_id,parent_sender,
+                             author.get('first_name') or author.get('username') or 'anonymous sender',parent_role,parent_text,
+                             date(parent.get('date')),date(parent.get('edit_date')),str(parent_id),digest(parent_text),
+                             json.dumps({'delivered_as_reply_context':True,'with_update_id':update_id}),self.scope.audience,str(parent_id)))
                 c.execute('INSERT INTO brodar_v2.messages '
                           '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,'
                           'sent_at,reply_to_id,edited_at,source_id,source_hash) '

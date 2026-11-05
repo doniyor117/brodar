@@ -10,6 +10,48 @@ from uuid import uuid4
 
 
 class RuntimeStore(ScopedStore):
+    async def work_state(self,uid):
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute("SELECT jsonb_build_object('receipts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) "
+                          "FROM (SELECT id,tool_call_id,method,status,response,request FROM brodar_v2.deliveries "
+                          "WHERE audience=%s AND turn_id=%s ORDER BY created_at) t),"
+                          "'artifacts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id AS artifact_id,filename "
+                          "FROM brodar_v2.artifacts WHERE audience=%s AND turn_id=%s) t))",
+                          (self.scope.audience,str(uid),self.scope.audience,str(uid)))
+                return c.fetchone()[0]
+        return await self.db.run(op)
+
+    async def reply_context(self,message_ids):
+        def op():
+            with self.db.transaction(self.scope.audience,readonly=True) as c:
+                c.execute('WITH RECURSIVE chain AS ('
+                    'SELECT m.*,0 AS depth,ARRAY[m.id] AS path FROM brodar_v2.messages m '
+                    'WHERE m.audience=%s AND m.id=ANY(%s::uuid[]) UNION ALL '
+                    'SELECT p.*,c.depth+1,c.path||p.id FROM chain c JOIN brodar_v2.messages p '
+                    'ON p.audience=c.audience AND p.platform_message_id=c.reply_to_id '
+                    'WHERE c.depth<8 AND NOT p.id=ANY(c.path)) '
+                    'SELECT DISTINCT ON(id) * FROM chain WHERE depth>0 ORDER BY id,depth',
+                    (self.scope.audience,message_ids))
+                return records(c)
+        return await self.db.run(op)
+
+    async def attach_content(self,uid,text):
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                c.execute('UPDATE brodar_v2.messages SET content=%s,source_hash=%s,changed_at=now() '
+                          'WHERE audience=%s AND id=%s AND source_hash<>%s RETURNING id',
+                          (text,digest(text),self.scope.audience,str(uid),digest(text)))
+                if c.fetchone() is None:return
+                c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='message' AND source_id=%s",(self.scope.audience,str(uid)))
+                c.execute('UPDATE brodar_v2.memory_documents SET needs_review=true WHERE audience=%s AND id IN '
+                          '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                          (self.scope.audience,self.scope.audience,str(uid)))
+                c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='memory' AND source_id IN "
+                          '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                          (self.scope.audience,self.scope.audience,str(uid)))
+        await self.db.run(op)
+
     async def work_begin(self,uid,requester_id,message_ids):
         payload={'requester_id':requester_id,'request_message_id':message_ids[0],
                  'message_ids':message_ids,'consumer_owner':self.lease_owner}

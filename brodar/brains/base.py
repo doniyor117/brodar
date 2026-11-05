@@ -27,6 +27,8 @@ class Brain(Protocol):
 
 def terminal(text: str, session_id: str | None) -> Outcome:
     import json
+    if text.strip().upper()=='[SILENT]':
+        return Outcome('completed','skip','deliberate silence',session_id=session_id)
     try:
         value = json.loads(text)
         if not isinstance(value,dict) or set(value)-{'action','reason'}:
