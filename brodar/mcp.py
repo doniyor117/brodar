@@ -69,6 +69,26 @@ def build_tools(broker):
         return result(await broker.send_message(text,call_id=operation_id,reply_to_message_id=reply_to_message_id))
 
     @mcp.tool()
+    async def telegram_react(message_id:int,emoji:str,operation_id:str)->str:
+        """Set one real standard emoji reaction on a message in this chat/topic. Empty emoji removes Brodar's reaction."""
+        return result(await broker.react(message_id,emoji,operation_id))
+
+    @mcp.tool()
+    async def telegram_send_poll(question:str,options:list[str],operation_id:str,multiple:bool=False)->str:
+        """Send a native anonymous poll to this chat/topic. Returns a real Telegram receipt."""
+        return result(await broker.poll(question,options,operation_id,multiple))
+
+    @mcp.tool()
+    async def telegram_edit_message(message_id:int,text:str,operation_id:str)->str:
+        """Edit Brodar's own message in this chat/topic, for a correction or progress update."""
+        return result(await broker.edit_message(message_id,text,operation_id))
+
+    @mcp.tool()
+    async def telegram_moderate(request_message_id:str,operation_id:str)->str:
+        """Carry out a fresh explicit /ban USER_ID, /mute USER_ID MINUTES, or /delete MESSAGE_ID request (reply targets also work). Both requester and bot need live Telegram admin rights. Use the request's archive UUID; historical/forwarded requests cannot authorize actions."""
+        return result(await broker.moderate(request_message_id,operation_id))
+
+    @mcp.tool()
     async def history_search(query:str,limit:int=10)->str:
         """Search this audience's full available history and learned notes, across group topics. Returns source IDs."""
         return result(await broker.search(query,limit))

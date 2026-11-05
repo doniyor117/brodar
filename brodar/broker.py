@@ -27,16 +27,33 @@ class ToolBroker:
         self.capability=None
         self._reads={}
         self._delivery_lock=asyncio.Lock()
+        self._moderation_requests={}
 
-    def begin(self,capability:TurnCapability):
+    def begin(self,capability:TurnCapability,*,moderation_requests=()):
         if self.capability is not None:raise RuntimeError('Previous capability is still active')
         UUID(capability.turn_id)
         self.capability=capability
         self._reads.clear()
+        self.accept_moderation_requests(moderation_requests)
+
+    def accept_moderation_requests(self,requests):
+        for request in requests:self._moderation_requests[request.message_id]=request
 
     def end(self):
         self.capability=None
         self._reads.clear()
+        self._moderation_requests.clear()
+
+    async def moderate(self,request_message_id,operation_id):
+        from .moderation import authorize,perform
+        cap=self.require(visible=True)
+        request=self._moderation_requests.get(request_message_id)
+        if request is None:raise PermissionError('No fresh explicit moderation request with this archive ID')
+        if request.action=='delete':await self.message_target(request.target)
+        await authorize(self.bot,self.store.scope,request)
+        async def send():return await perform(self.bot,self.store.scope,request)
+        return await self.deliver(cap,'moderate',{'request_message_id':request_message_id,
+            'actor_id':request.actor_id,'action':request.action,'target':request.target,'minutes':request.minutes},operation_id,send)
 
     def require(self,*,visible=False):
         cap=self.capability
@@ -44,6 +61,42 @@ class ToolBroker:
         if visible and cap.mode!='conversation':
             raise PermissionError('Reflection can update context, not post in chat')
         return cap
+
+    async def message_target(self,message_id,*,own=False):
+        def op():
+            with self.store.db.transaction(self.store.scope.audience,readonly=True) as c:
+                c.execute('SELECT sender_id,role FROM brodar_v2.messages WHERE audience=%s AND topic_id=%s '
+                          'AND platform_message_id=%s',(self.store.scope.audience,self.store.scope.topic_id,message_id))
+                row=c.fetchone()
+                if row is None:raise ValueError('Message target is not in this conversation')
+                if own and (row[0]!=self.store.scope.bot_id or row[1]!='assistant'):
+                    raise PermissionError('Only Brodar’s own messages can be edited')
+        await self.store.db.run(op)
+
+    async def react(self,message_id,emoji,operation_id):
+        cap=self.require(visible=True)
+        if len(emoji)>16:raise ValueError('Use one standard reaction emoji, or empty text to remove it')
+        await self.message_target(message_id)
+        async def send():return await self.bot.set_message_reaction(chat_id=self.store.scope.chat_id,
+            message_id=message_id,reaction=emoji or [])
+        return await self.deliver(cap,'set_reaction',{'message_id':message_id,'emoji':emoji},operation_id,send)
+
+    async def poll(self,question,options,operation_id,multiple=False):
+        cap=self.require(visible=True)
+        if not 1<=len(question)<=300 or not 1<=len(options)<=12 or any(not 1<=len(text)<=100 for text in options):
+            raise ValueError('Use a question of 1..300 characters and 1..12 options of 1..100 characters')
+        kwargs={'chat_id':self.store.scope.chat_id,'question':question,'options':options,
+                'is_anonymous':True,'allows_multiple_answers':multiple}
+        if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
+        async def send():return await self.bot.send_poll(**kwargs)
+        return await self.deliver(cap,'send_poll',{'question':question,'options':options,'multiple':multiple},operation_id,send)
+
+    async def edit_message(self,message_id,text,operation_id):
+        cap=self.require(visible=True)
+        if not text.strip() or len(text)>4096:raise ValueError('Use 1..4096 characters')
+        await self.message_target(message_id,own=True)
+        async def send():return await self.bot.edit_message_text(chat_id=self.store.scope.chat_id,message_id=message_id,text=text)
+        return await self.deliver(cap,'edit_message',{'message_id':message_id,'text':text},operation_id,send)
 
     async def send_message(self,text:str,*,call_id:str,reply_to_message_id:int|None=None):
         cap=self.require(visible=True)
@@ -80,8 +133,12 @@ class ToolBroker:
             if receipt['status']!='pending':
                 raise RuntimeError('Previous delivery is failed, in progress or uncertain; do not blindly replay it')
             if self.delivery_guard:
-                await self.delivery_guard()
-                if self.capability is not cap:raise PermissionError('Turn was cancelled before delivery')
+                try:
+                    await self.delivery_guard()
+                    if self.capability is not cap:raise PermissionError('Turn was cancelled before delivery')
+                except BaseException:
+                    await asyncio.shield(self.store.delivery_finish(receipt['id'],'failed',{'error':'delivery_guard_rejected_before_send'}))
+                    raise
             try:
                 sent=await send()
             except (BadRequest,Forbidden,RetryAfter) as exc:
@@ -95,7 +152,14 @@ class ToolBroker:
                 # accepted a request. Persist uncertainty whenever possible.
                 await asyncio.shield(self.store.delivery_finish(receipt['id'],'uncertain',{'error':'interrupted_delivery'}))
                 raise
-            result={'message_id':sent.message_id,'delivered':True}
+            if sent is False:
+                await self.store.delivery_finish(receipt['id'],'failed',{'error':'telegram_returned_false'})
+                raise RuntimeError('Telegram did not confirm the action')
+            result={'delivered':True}
+            if getattr(sent,'message_id',None):result['message_id']=sent.message_id
+            elif sent is not True:
+                await self.store.delivery_finish(receipt['id'],'uncertain',{'error':'unexpected_telegram_result'})
+                raise RuntimeError('Unexpected Telegram response; delivery outcome is uncertain')
             await self.store.delivery_finish(receipt['id'],'sent',result)
             return result
 

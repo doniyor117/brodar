@@ -32,7 +32,7 @@ async def doctor(cfg):
 
 def main():
     parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.')
-    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','backup','restore'],default='run')
+    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','backup','restore','forget-history'],default='run')
     parser.add_argument('--brain',choices=['codex','claude'])
     parser.add_argument('--env-file',type=Path)
     parser.add_argument('--admin-url-file',type=Path,help='Private file holding an operator database URL; never pass a URL on the command line')
@@ -46,11 +46,13 @@ def main():
     parser.add_argument('--source-storage-config',type=Path,help='Restore source, if different from destination storage')
     parser.add_argument('--recovery-key-file',type=Path,help='Private recovery-key file; never commit it')
     parser.add_argument('--backup-id')
+    parser.add_argument('--audience')
+    parser.add_argument('--message-id',action='append',default=[])
     args=parser.parse_args()
     logging.basicConfig(level=logging.WARNING,format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.ERROR)
     cfg=Settings.load(env_file=args.env_file,brain=args.brain)
-    if args.command in {'migrate','provision','import-history','export-history','backup','restore'}:
+    if args.command in {'migrate','provision','import-history','export-history','backup','restore','forget-history'}:
         from .operator import database_command
         print(json.dumps(asyncio.run(database_command(args)),indent=2))
     elif args.command=='login':

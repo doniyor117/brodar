@@ -107,7 +107,11 @@ async def verify_import(db: Postgres, archive: dict, *, instance_id: str = 'brod
                 c.execute('SELECT content,legacy_timestamp,sender_id,metadata,source_id FROM brodar_v2.messages '
                           'WHERE audience=%s AND source=%s',(scope.audience,archive['source']))
                 found={row[4]:row for row in c.fetchall()}
+                c.execute('SELECT source_id FROM brodar_v2.forgotten_sources WHERE audience=%s AND source=%s',
+                          (scope.audience,archive['source']))
+                forgotten={row[0] for row in c.fetchall()}
                 for r in expected:
+                    if str(r['id']) in forgotten:continue
                     row=found.get(str(r['id']))
                     if not row or row[0]!=scrub(r['content']) or row[1]!=r['created_at'] or row[2]!=r.get('user_id'):
                         raise RuntimeError('Legacy import verification failed')

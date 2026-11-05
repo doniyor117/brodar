@@ -29,6 +29,8 @@ from .scope import Scope
 from .objects import ObjectStore
 from .artifacts import Artifacts
 from .recovery import ConsumerLease
+from .telegram_context import ordinary_message,public_payload
+from .moderation import requests as moderation_requests
 
 log=logging.getLogger('brodar')
 
@@ -121,7 +123,9 @@ class Conversation:
                 return  # materialize media in the next durable foreground turn
             messages=await self.store.history_get([str(r['message_id']) for r in batch])
             accepted=await self.brain.steer(envelope(messages))
-            if accepted:self.inflight.extend(batch)
+            if accepted:
+                self.inflight.extend(batch)
+                self.broker.accept_moderation_requests(moderation_requests(batch))
             else:await self.store.finish_inputs([r['id'] for r in batch],retry=True)
 
     async def cancel(self,requester_id):
@@ -213,7 +217,7 @@ class Conversation:
         self._turn_id=str(batch[0]['id'])
         payload_message=batch[-1]['payload'].get('message') or batch[-1]['payload'].get('edited_message') or {}
         requester=(payload_message.get('from') or {}).get('id') if not payload_message.get('sender_chat') else None
-        self.broker.begin(TurnCapability(self._turn_id,requester_id=requester))
+        self.broker.begin(TurnCapability(self._turn_id,requester_id=requester),moderation_requests=moderation_requests(batch))
         await self.materialize(batch)
         if self._cancelled:
             await self.store.finish_inputs([r['id'] for r in self.inflight],error='cancelled')
@@ -411,7 +415,9 @@ async def run(cfg):
                 continue
             for update in updates:
                 message=update.effective_message
-                if message is not None and message.chat_id in cfg.allowed_chats:
+                raw=update.to_dict()
+                raw_message=raw.get('message') or raw.get('edited_message') or {}
+                if message is not None and message.chat_id in cfg.allowed_chats and ordinary_message(raw_message):
                     sender=message.from_user if message.sender_chat is None else None
                     scope=Scope(me.id,message.chat_id,message.message_thread_id or 0,cfg.instance_id)
                     store=LearningStore(db,scope,lease_owner=lease.owner)
@@ -419,7 +425,7 @@ async def run(cfg):
                     iid,new=await store.ingest(update_id=update.update_id,message_id=message.message_id,
                         sender_id=sender.id if sender else None,sender_name=sender.full_name if sender else 'anonymous sender',
                         text=text,timestamp=message.date,reply_to_id=message.reply_to_message.message_id if message.reply_to_message else None,
-                        edited_at=message.edit_date,payload=update.to_dict())
+                        edited_at=message.edit_date,payload=public_payload(raw))
                     if new:
                         conversation=await get_conversation(scope)
                         if text.split('@',1)[0].strip()=='/cancel' and sender:
@@ -432,7 +438,8 @@ async def run(cfg):
                                 (message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id==me.id))
                             await conversation.signal(direct=direct)
                 elif message is not None:
-                    log.warning('Unconfigured chat observed: id=%s type=%s',message.chat_id,message.chat.type)
+                    if not ordinary_message(raw_message):log.warning('Recipient-scoped Telegram input omitted from ordinary chat history')
+                    else:log.warning('Unconfigured chat observed: id=%s type=%s',message.chat_id,message.chat.type)
                 # Advance only after durable ingest (or deliberate access skip).
                 offset=update.update_id+1
                 def advance():

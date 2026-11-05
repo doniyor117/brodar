@@ -57,6 +57,13 @@ class ScopedStore:
                     if c.fetchone() is None:raise PermissionError('Consumer lease expired before ingest')
                 c.execute('INSERT INTO brodar_v2.audience_registry(audience,instance_id,chat_id) VALUES (%s,%s,%s) '
                           'ON CONFLICT DO NOTHING',(self.scope.audience,self.scope.instance_id,self.scope.chat_id))
+                c.execute("SELECT 1 FROM brodar_v2.forgotten_sources WHERE audience=%s AND source='telegram' AND source_id=%s",
+                          (self.scope.audience,str(message_id)))
+                if c.fetchone():
+                    c.execute('INSERT INTO brodar_v2.poll_state(bot_id,next_update_id) VALUES (%s,%s) '
+                              'ON CONFLICT(bot_id) DO UPDATE SET next_update_id=greatest(poll_state.next_update_id,excluded.next_update_id)',
+                              (self.scope.bot_id,update_id+1))
+                    return iid,False
                 c.execute('INSERT INTO brodar_v2.messages '
                           '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,'
                           'sent_at,reply_to_id,edited_at,source_id,source_hash) '

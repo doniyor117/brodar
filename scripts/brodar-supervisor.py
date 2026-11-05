@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import sys
 import threading
 import time
 
@@ -49,11 +48,18 @@ def main():
                   '--recovery-key-file',str(args.backup_key_file)]
             proc=subprocess.Popen(argv,cwd=repo,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
             try:
-                output,_=proc.communicate(timeout=900)
+                deadline=time.monotonic()+900
+                while True:
+                    try:
+                        output,_=proc.communicate(timeout=1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if stop.is_set() or time.monotonic()>deadline:
+                            proc.kill();proc.communicate()
+                            if not stop.is_set():log.error('Scheduled backup timed out')
+                            return
                 if proc.returncode:log.error('Scheduled backup failed code=%s; run the operator command to diagnose',proc.returncode)
                 else:log.info('Scheduled backup complete id=%s',json.loads(output)['backup_id'])
-            except subprocess.TimeoutExpired:
-                proc.kill();proc.communicate();log.error('Scheduled backup timed out')
             except Exception as exc:log.error('Backup status unavailable: %s',type(exc).__name__)
     if args.backup_admin_file:threading.Thread(target=backups,daemon=True).start()
     subprocess.run(['termux-wake-lock'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)

@@ -25,7 +25,7 @@ async def stores():
     def cleanup():
         for s in [a,b]:
             with db.transaction(s.scope.audience) as c:
-                for table in ['memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages']:
+                for table in ['memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources']:
                     c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(s.scope.audience,))
                 c.execute('DELETE FROM brodar_v2.poll_state WHERE bot_id=%s',(bot_id,))
                 c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(s.scope.audience,))
@@ -125,3 +125,30 @@ async def test_consumer_takeover_reclaims_work_and_fences_previous_owner(stores)
     finally:
         await first.release()
         await second.release()
+
+
+@pytest.mark.asyncio
+async def test_source_forgetting_removes_derivatives_and_prevents_reimport(stores):
+    from brodar.forgetting import forget_messages
+    from brodar.legacy import import_messages,verify_import
+    from brodar.learning import LearningStore
+    a,b=stores
+    a=LearningStore(a.db,a.scope)
+    await add(a,'source detail to forget')
+    mid=str((await a.recent())[0]['id'])
+    await a.memory_write('context/detail.md','learned from that source',expected_revision=0,reason='fixture',source_ids=[mid])
+    await a.session_put('codex','fixture','stale-session')
+    result=await forget_messages(a.db,a.scope.audience,[mid])
+    assert result['forgotten_messages']==1 and result['retired_source_linked_notes']==1
+    assert await a.memory_read('context/detail.md') is None
+    assert await a.recent()==[]
+    assert await a.session_get('codex','fixture') is None
+    assert (await add(a,'source detail to forget',update=1))[1] is False
+    archive={'source':'legacy-fixture','tables':{'messages':[{'id':1,'chat_id':a.scope.chat_id,
+        'created_at':'2026-07-25 12:00:00','role':'user','content':'legacy detail'}]}}
+    assert (await import_messages(a.db,archive,instance_id=a.scope.instance_id))['inserted']==1
+    legacy=str((await a.recent())[0]['id'])
+    await forget_messages(a.db,a.scope.audience,[legacy])
+    assert (await import_messages(a.db,archive,instance_id=a.scope.instance_id))['inserted']==0
+    assert await verify_import(a.db,archive,instance_id=a.scope.instance_id)==0
+    assert await b.recent()==[]

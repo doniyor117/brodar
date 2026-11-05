@@ -121,10 +121,11 @@ class RuntimeStore(ScopedStore):
                     c.execute('SELECT method,request FROM brodar_v2.deliveries WHERE audience=%s AND id=%s',
                               (self.scope.audience,str(uid)))
                     delivery=c.fetchone()
-                    if delivery and delivery[0] in {'send_message','send_document'}:
+                    if delivery and delivery[0] in {'send_message','send_document','send_poll'}:
                         request=delivery[1]
-                        text=request['text'] if delivery[0]=='send_message' else (
-                            request.get('caption','')+'\n[document: '+request['filename']+'; artifact_id: '+request['artifact_id']+']')
+                        if delivery[0]=='send_message':text=request['text']
+                        elif delivery[0]=='send_poll':text='[poll] '+request['question']+'\n'+'\n'.join(request['options'])
+                        else:text=request.get('caption','')+'\n[document: '+request['filename']+'; artifact_id: '+request['artifact_id']+']'
                         mid=str(uuid5(NAMESPACE_URL,f'{self.scope.audience}:telegram:{response["message_id"]}'))
                         c.execute('INSERT INTO brodar_v2.messages '
                                   '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,'
@@ -134,6 +135,26 @@ class RuntimeStore(ScopedStore):
                                   (mid,self.scope.audience,self.scope.topic_id,response['message_id'],self.scope.bot_id,
                                    text,datetime.now(timezone.utc),request.get('reply_to_message_id'),
                                    str(response['message_id']),digest(text)))
+                if status=='sent':
+                    c.execute('SELECT method,request FROM brodar_v2.deliveries WHERE audience=%s AND id=%s',
+                              (self.scope.audience,str(uid)))
+                    delivery=c.fetchone()
+                    if delivery and delivery[0]=='edit_message':
+                        message_id=delivery[1]['message_id'];text=delivery[1]['text']
+                        c.execute('UPDATE brodar_v2.messages SET content=%s,source_hash=%s,edited_at=now(),changed_at=now() '
+                                  'WHERE audience=%s AND platform_message_id=%s AND sender_id=%s RETURNING id',
+                                  (text,digest(text),self.scope.audience,message_id,self.scope.bot_id))
+                        changed=c.fetchone()
+                        if changed:
+                            mid=str(changed[0])
+                            c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='message' AND source_id=%s",
+                                      (self.scope.audience,mid))
+                            c.execute('UPDATE brodar_v2.memory_documents SET needs_review=true WHERE audience=%s AND id IN '
+                                      '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                                      (self.scope.audience,self.scope.audience,mid))
+                            c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='memory' AND source_id IN "
+                                      '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                                      (self.scope.audience,self.scope.audience,mid))
         await self.db.run(op)
 
     async def delivery_receipts(self,turn_id):

@@ -17,6 +17,10 @@ async def database_command(args):
     uri=args.admin_url_file.expanduser().read_text().strip()
     db=Postgres(uri)
     try:
+        if args.command=='forget-history':
+            from .forgetting import forget_messages
+            if not args.audience:raise ValueError('--audience is required')
+            return await forget_messages(db,args.audience,args.message_id)
         if args.command in {'backup','restore'}:
             from .backups import backup,restore
             from .objects import ObjectStore
