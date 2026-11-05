@@ -37,7 +37,9 @@ class AuditedMcp(FastMCP):
         super().__init__('hamroh',stateless_http=True,json_response=True,log_level='WARNING')
 
     def add_tool(self,fn,*args,**kwargs):
-        signature=inspect.signature(fn)
+        # Resolve annotations before assigning __signature__: inspect does not
+        # eval forward references inside an already supplied Signature object.
+        signature=inspect.signature(fn,eval_str=True)
         @functools.wraps(fn)
         async def audited(*values,**named):
             start=time.monotonic()
