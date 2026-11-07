@@ -41,3 +41,7 @@ Browser tests require the optional browser package. Live Claude tests require `B
 [Plan](docs/brodar/PLAN.md) · [Memory design](docs/brodar/SELF-EVOLUTION.md) · [Code review](docs/brodar/CODE-REVIEW.md) · [Upstream Hamroh documentation](docs/UPSTREAM-HAMROH.md)
 
 Brodar retains Hamroh's Git history and MIT attribution. The historical `hamroh` command and Claude worker remain available; Brodar's shared runtime lives in `brodar/`.
+
+## Continuing development
+
+Development agents: start with [AGENTS.md](AGENTS.md) and the detailed [project context](docs/brodar/PROJECT-CONTEXT.md). [CLAUDE.md](CLAUDE.md) points to the same guide.
