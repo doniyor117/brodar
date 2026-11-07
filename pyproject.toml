@@ -68,6 +68,7 @@ packages = ["hamroh", "brodar"]
 "prompts/memory-consolidation.md" = "brodar/assets/memory-consolidation.md"
 "prompts/memory-maintenance.md" = "brodar/assets/memory-maintenance.md"
 "prompts/memory-turn.md" = "brodar/assets/memory-turn.md"
+"prompts/memory-evaluation.md" = "brodar/assets/memory-evaluation.md"
 "prompts/repair-missing-files.md" = "brodar/assets/repair-missing-files.md"
 "prompts/repair-no-delivery.md" = "brodar/assets/repair-no-delivery.md"
 "prompts/runtime.md" = "brodar/assets/runtime.md"

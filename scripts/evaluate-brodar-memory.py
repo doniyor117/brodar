@@ -27,6 +27,7 @@ from brodar.scope import Scope
 from brodar.settings import Settings
 from brodar.broker import TurnCapability
 from brodar.prompts import authorized,envelope
+from brodar.prompt_files import render
 
 async def main(args):
     uri=os.environ.get('BRODAR_TEST_DATABASE_URL')
@@ -46,7 +47,7 @@ async def main(args):
                     await store.memory_write('context/overview.md','Conversation evidence is available through history tools; check corrections and whose feedback applies.',expected_revision=0,reason='synthetic evaluation',source_ids=ids)
                 await worker.start(maintenance=True)
                 cap=TurnCapability(str(uuid4()),mode='reflection');worker.broker.begin(cap)
-                payload='Evaluation only. Answer this synthetic user question using available history and memory. Return the actual answer as plain text; the harness will record internal text. Question: '+case['question']+'\n'+envelope([],notes=await store.context_notes([]))
+                payload=render('memory-evaluation.md',question=case['question'],context=envelope([],notes=await store.context_notes([])))
                 start=time.monotonic();result=await asyncio.wait_for(worker.brain.turn(authorized(payload,cap)),120)
                 print(json.dumps({'case':case['id'],'mode':args.mode,'seconds':round(time.monotonic()-start,3),'answer':result.internal_text or result.reason,'status':result.status,'rubric':case['rubric']},ensure_ascii=False))
             finally:
