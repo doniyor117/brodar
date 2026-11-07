@@ -143,7 +143,7 @@ async def restore(db, objects, backup_id, *, key_file=None, source_objects=None)
     for tables in data['audiences'].values():
         for artifact in tables['artifacts']:
             digest=artifact['content_hash']
-            encrypted=await source.get(data['objects'][digest],bucket=source.backups_bucket,max_bytes=30_000_000)
+            encrypted=await source.get(data['objects'][digest],bucket=source.backups_bucket,max_bytes=70_000_000)
             body=cipher.decrypt(encrypted)
             if sha(body)!=digest or len(body)!=artifact['size_bytes']:raise ValueError('Backup artifact checksum mismatch')
             await objects.put(artifact['object_key'],body,artifact['mime_type'])
