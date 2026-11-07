@@ -10,6 +10,9 @@ class Approvals:
 
     async def request(self,scope,turn_id,artifact_id,content_hash,reason):
         action={'kind':'sensitive_file_read','artifact_id':str(UUID(artifact_id)),'content_hash':content_hash}
+        return await self.request_action(scope,turn_id,action,reason)
+
+    async def request_action(self,scope,turn_id,action,reason):
         uid=str(uuid4());fingerprint=digest(json.dumps(action,sort_keys=True))
         def save():
             with self.db.transaction(scope.audience) as c:
@@ -17,9 +20,9 @@ class Approvals:
                 c.execute('INSERT INTO brodar_v2.approvals(id,audience,topic_id,turn_id,action_hash,action) VALUES (%s,%s,%s,%s,%s,%s::jsonb)',
                     (uid,scope.audience,scope.topic_id,turn_id,fingerprint,json.dumps(action)))
         await self.db.run(save)
-        text=(f'Brodar approval {uid}\nRead sensitive artifact {artifact_id} for chat {scope.chat_id}, topic {scope.topic_id}. '
+        text=(f'Brodar approval {uid}\nAction: {scrub(json.dumps(action))[:2000]}\nFor chat {scope.chat_id}, topic {scope.topic_id}. '
               f'Its contents may be used in replies there.\nReason: {scrub(reason)[:500]}\n'
-              f'/approve {uid}\n/deny {uid}\nExpires in 15 minutes. Approves this exact file version only.')
+              f'/approve {uid}\n/deny {uid}\nExpires in 15 minutes. Approves this exact action only.')
         from .write_fence import WRITE_FENCE
         notified=False
         for owner in sorted(self.cfg.owner_ids):
@@ -48,6 +51,9 @@ class Approvals:
 
     async def consume(self,scope,uid,artifact_id,content_hash):
         action={'kind':'sensitive_file_read','artifact_id':str(UUID(artifact_id)),'content_hash':content_hash}
+        return await self.consume_action(scope,uid,action)
+
+    async def consume_action(self,scope,uid,action):
         fingerprint=digest(json.dumps(action,sort_keys=True))
         def use():
             with self.db.transaction(scope.audience) as c:

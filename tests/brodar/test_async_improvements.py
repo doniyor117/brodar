@@ -84,3 +84,24 @@ async def test_slow_audit_does_not_block_tool_result():
         assert not release.is_set()
     finally:
         release.set();await mcp.close_audit()
+
+@pytest.mark.parametrize('argv',[
+ ['rm','-rf','.'],['bash','-c','cat secret'],['python3.14','-c','print(1)'],
+ ['cat','../../secrets/.env'],['cat','credentials.json'],['cat','/proc/self/environ'],
+ ['sort','--compress-program=python'],['file','--files-from=input.txt'],['cat','a;pwd']])
+def test_commands_deny_dangerous_credentials_and_escape(tmp_path,argv):
+    from brodar.commands import CommandGateway
+    with pytest.raises(PermissionError):CommandGateway(tmp_path).classify(argv)
+
+@pytest.mark.asyncio
+async def test_commands_are_argv_only_and_mutations_need_approval(tmp_path):
+    from brodar.commands import CommandGateway
+    root=tmp_path/'work';root.mkdir();(root/'hello.txt').write_text('hello')
+    gateway=CommandGateway(root)
+    assert (await gateway.run(['cat','hello.txt']))['output']=='hello'
+    await gateway.run(['touch','new.txt'])
+    assert (root/'new.txt').exists()
+    with pytest.raises(PermissionError):await gateway.run(['cp','hello.txt','new.txt'])
+    assert gateway.classify(['cat','sensitive/report.txt'])[1]
+    (root/'alias').symlink_to(root/'hello.txt')
+    with pytest.raises(PermissionError):gateway.classify(['cat','alias'])

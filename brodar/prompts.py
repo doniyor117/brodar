@@ -28,7 +28,7 @@ def compose(*,model:str,provider:str,tools:list[str],timezone:str='UTC'):
     runtime+='Durable artifacts are this audience workspace. Use artifact_list/read, create_file or workspace_save; stored files survive phone loss. '
     runtime+='Sensitive file reads require request_file_approval and an approval_id from verified owner DM consent. '
     runtime+='Wait for actual approval; never claim it was granted or the file was read prematurely. '
-    runtime+='No isolated shell worker is configured. Never claim scripts were executed. Never disclose credentials.\n'
+    runtime+='workspace_command runs host-checked argv directly. Dangerous commands, interpreters, credentials and outside paths are denied. Overwrites and sensitive paths need owner DM approval. Never claim unavailable scripts ran. Never disclose credentials.\n'
     return fixed+runtime,revision
 
 

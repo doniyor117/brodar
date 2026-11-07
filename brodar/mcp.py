@@ -213,6 +213,24 @@ def build_tools(broker):
         return result(await broker.memory_forget(path,expected_revision))
 
     @mcp.tool()
+    async def workspace_command(argv:list[str],approval_id:str|None=None)->str:
+        """Run a host-checked command in this chat scratch workspace. No shell syntax/interpreters, credential access or outside paths. Overwrites and private/sensitive paths require exact owner-DM approval."""
+        cap=broker.require(visible=True)
+        if not hasattr(broker,'commands'):raise RuntimeError('Workspace command gateway unavailable')
+        def check():
+            if broker.capability is not cap:raise PermissionError('Turn revoked')
+        return result(await broker.commands.run(argv,approvals=broker.approvals,scope=broker.store.scope,approval_id=approval_id,check=check))
+
+    @mcp.tool()
+    async def request_command_approval(argv:list[str],reason:str)->str:
+        """Ask owner in DM for an allowed command requiring approval. Denied commands and credential paths cannot be approved."""
+        cap=broker.require(visible=True)
+        if not hasattr(broker,'commands') or broker.approvals is None:raise RuntimeError('Command approval unavailable')
+        action,needed=broker.commands.classify(argv)
+        if not needed:return result({'approval_required':False})
+        return result(await broker.approvals.request_action(broker.store.scope,cap.turn_id,action,reason))
+
+    @mcp.tool()
     async def skills_list(query:str='',offset:int=0,limit:int=30)->str:
         """Discover installed Codex and Claude skills by topic; instructions do not grant extra tools or access."""
         from .skills import LIBRARY
@@ -268,6 +286,15 @@ def build_tools(broker):
                 return result(await broker.artifacts.put(turn_id=cap.turn_id,operation_id=operation_id,
                     filename=filename,mime=mime_type,body=body,request_hash=hashlib.sha256(body+filename.encode()+mime_type.encode()+str(sensitive).encode()).hexdigest(),metadata={'sensitive':sensitive}))
             finally:WRITE_FENCE.reset(token)
+
+        @mcp.tool()
+        async def workspace_checkout(artifact_id:str,approval_id:str|None=None)->str:
+            """Copy a durable audience artifact into this chat scratch workspace. Sensitive files require exact owner DM approval; existing names are not overwritten."""
+            cap=broker.require(visible=True)
+            if not hasattr(broker,'commands'):raise RuntimeError('Workspace unavailable')
+            def check():
+                if broker.capability is not cap:raise PermissionError('Turn revoked')
+            return result(await broker.commands.checkout(broker.artifacts,artifact_id,approvals=broker.approvals,approval_id=approval_id,check=check))
 
         @mcp.tool()
         async def workspace_protect(artifact_id:str)->str:

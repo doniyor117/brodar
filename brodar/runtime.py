@@ -84,6 +84,8 @@ class Conversation:
         self._turn_id=None
         key=hashlib.sha256(store.scope.conversation.encode()).hexdigest()[:24]
         self.root=cfg.runtime_dir/'providers'/cfg.brain/key
+        from .commands import CommandGateway
+        self.broker.commands=CommandGateway(cfg.runtime_dir/'workspaces'/key)
 
     async def start(self, *, maintenance=False):
         if maintenance:
