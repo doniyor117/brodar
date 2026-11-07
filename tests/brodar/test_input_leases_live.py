@@ -27,7 +27,14 @@ async def test_deferred_inputs_do_not_spend_attempts_and_active_inputs_stay_owne
                 sender_name='test', text='request', timestamp=datetime.now(timezone.utc), payload={})
         active = (await store.claim_inputs(limit=1))[0]
         for _ in range(4):
+            await lease.acquire()  # mirror production heartbeat on slow remote DBs
             queued = await store.claim_inputs(count_attempt=False, exclude_ids=[active['id']])
+            if not queued:
+                def inspect_inputs():
+                    with db.transaction(scope.audience,readonly=True) as c:
+                        c.execute('SELECT status,attempts,lease_owner FROM brodar_v2.inbox WHERE audience=%s',(scope.audience,))
+                        return c.fetchall()
+                pytest.fail('Unexpected inbox states: '+str(await db.run(inspect_inputs)))
             assert len(queued) == 1 and queued[0]['attempts'] == 0
             await store.finish_inputs([queued[0]['id']], retry=True)
         accepted = await store.claim_inputs(count_attempt=False, exclude_ids=[active['id']])

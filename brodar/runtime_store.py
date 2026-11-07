@@ -158,14 +158,19 @@ class RuntimeStore(ScopedStore):
                     c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now()',
                               (self.scope.bot_id,self.lease_owner))
                     if c.fetchone() is None:raise PermissionError('Telegram consumer lease is no longer active')
-                c.execute("UPDATE brodar_v2.inbox SET status='running',attempts=attempts+%s,"
-                          "lease_owner=%s,lease_until=now()+interval '15 minutes' WHERE id IN ("
-                          "SELECT id FROM brodar_v2.inbox WHERE audience=%s AND topic_id=%s AND NOT (id=ANY(%s::uuid[])) "
+                # Materialize the locked candidate IDs once. An IN subquery with
+                # SKIP LOCKED can otherwise be rescanned as rows change status,
+                # claiming more than LIMIT and charging excluded inputs again.
+                c.execute("WITH claimed AS MATERIALIZED (SELECT id FROM brodar_v2.inbox "
+                          "WHERE audience=%s AND topic_id=%s AND NOT (id=ANY(%s::uuid[])) "
                           "AND (status='pending' OR (status='running' AND (lease_until<now() OR "
                           "(%s::uuid IS NOT NULL AND lease_owner IS DISTINCT FROM %s::uuid)))) "
-                          "ORDER BY update_id LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *",
-                          (int(count_attempt),self.lease_owner,self.scope.audience,self.scope.topic_id,
-                           [str(uid) for uid in exclude_ids],self.lease_owner,self.lease_owner,max(1,min(limit,100))))
+                          "ORDER BY update_id LIMIT %s FOR UPDATE SKIP LOCKED) "
+                          "UPDATE brodar_v2.inbox i SET status='running',attempts=i.attempts+%s,"
+                          "lease_owner=%s,lease_until=now()+interval '15 minutes' "
+                          "FROM claimed WHERE i.id=claimed.id RETURNING i.*",
+                          (self.scope.audience,self.scope.topic_id,[str(uid) for uid in exclude_ids],
+                           self.lease_owner,self.lease_owner,max(1,min(limit,100)),int(count_attempt),self.lease_owner))
                 return sorted(records(c),key=lambda r:r['update_id'])
         return await self.db.run(op)
 
