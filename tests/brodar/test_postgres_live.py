@@ -25,7 +25,7 @@ async def stores():
     def cleanup():
         for s in [a,b]:
             with db.transaction(s.scope.audience) as c:
-                for table in ['memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources','jobs']:
+                for table in ['maintenance_runs','reflection_state','memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources','jobs']:
                     c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(s.scope.audience,))
                 c.execute('DELETE FROM brodar_v2.poll_state WHERE bot_id=%s',(bot_id,))
                 c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(s.scope.audience,))
@@ -230,3 +230,43 @@ async def test_delivered_reply_parent_is_context_without_becoming_a_new_request(
         timestamp=datetime.now(timezone.utc),reply_to_id=6,payload=other)
     latest=next(row for row in await a.recent() if row['platform_message_id']==11)
     assert await a.reply_context([str(latest['id'])])==[]
+
+@pytest.mark.asyncio
+async def test_maintenance_chunk_restart_and_evidence_edit(stores):
+    from brodar.learning import LearningStore
+    a,b=stores
+    store=LearningStore(a.db,a.scope)
+    await add(a,'x'*65000)
+    first=await store.maintenance_prepare()
+    assert len(first['messages'][0]['content'])==30000 and first['offset']==30000
+    await store.maintenance_finish(first)
+    second=await store.maintenance_prepare()
+    assert second['offset']==60000
+    # Crash without checkpoint: a fresh worker replays the exact pending chunk.
+    replay=await LearningStore(a.db,a.scope).maintenance_prepare()
+    assert replay['messages']==second['messages']
+    await store.maintenance_finish(replay)
+    last=await store.maintenance_prepare()
+    assert len(last['messages'][0]['content'])==5000 and last['offset']==0
+    def edit():
+        with a.db.transaction(a.scope.audience) as c:
+            c.execute("UPDATE brodar_v2.messages SET changed_at=now() WHERE audience=%s",(a.scope.audience,))
+    await a.db.run(edit)
+    with pytest.raises(RevisionConflict):await store.maintenance_finish(last)
+    other=LearningStore(b.db,b.scope)
+    assert await other.maintenance_prepare() is None
+
+@pytest.mark.asyncio
+async def test_review_flag_requires_source_read_evidence(stores):
+    a,_=stores
+    await add(a,'prefers explanations in uzbek')
+    mid=str((await a.recent())[0]['id'])
+    await a.memory_write('context/person.md','uzbek',expected_revision=0,reason='feedback',source_ids=[mid])
+    def flag():
+        with a.db.transaction(a.scope.audience) as c:
+            c.execute('UPDATE brodar_v2.memory_documents SET needs_review=true WHERE audience=%s',(a.scope.audience,))
+    await a.db.run(flag)
+    await a.memory_write('context/person.md','changed guess',expected_revision=1,reason='unchecked')
+    assert (await a.memory_read('context/person.md'))['needs_review']
+    await a.memory_write('context/person.md','uzbek',expected_revision=2,reason='checked original',reviewed_sources={mid:__import__('hashlib').sha256(b'prefers explanations in uzbek').hexdigest()})
+    assert not (await a.memory_read('context/person.md'))['needs_review']

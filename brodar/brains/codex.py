@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
+import time
 import os
 from pathlib import Path
 
@@ -119,6 +121,9 @@ class CodexBrain:
             return
         if params.get('threadId')!=self.session_id:
             return
+        if getattr(self,'_first_event_at',None) is not None and method.startswith(('item/','turn/')):
+            logging.getLogger('brodar.metrics').warning('Codex first_event_ms=%d',int((time.monotonic()-self._first_event_at)*1000))
+            self._first_event_at=None
         if method=='item/completed':
             item = params.get('item',{})
             if item.get('type')=='agentMessage':
@@ -153,6 +158,7 @@ class CodexBrain:
             return Outcome('failed',error='transport_closed',session_id=self.session_id)
         self._waiter = asyncio.get_running_loop().create_future()
         self._starting = True
+        self._first_event_at=time.monotonic()
         try:
             result = await self.rpc.request('turn/start',{
                 'threadId':self.session_id,'input':[{'type':'text','text':text}],

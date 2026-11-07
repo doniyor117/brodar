@@ -39,6 +39,8 @@ class AuditedMcp(FastMCP):
     def add_tool(self,fn,*args,**kwargs):
         # Resolve annotations before assigning __signature__: inspect does not
         # eval forward references inside an already supplied Signature object.
+        if getattr(self.broker,'maintenance',False) and not (fn.__name__.startswith(('memory_','history_')) or fn.__name__=='search'):
+            return None
         signature=inspect.signature(fn,eval_str=True)
         @functools.wraps(fn)
         async def audited(*values,**named):
@@ -139,7 +141,7 @@ def build_tools(broker):
     async def history_get(message_ids:list[str])->str:
         """Read original messages by archive UUID, from this audience only."""
         broker.require()
-        return result(await broker.store.history_get(message_ids))
+        return result(await broker.history_get(message_ids))
 
     @mcp.tool()
     async def memory_list(limit:int=100,offset:int=0)->str:

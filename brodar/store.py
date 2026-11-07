@@ -160,12 +160,15 @@ class ScopedStore:
                 c.execute('SELECT * FROM brodar_v2.memory_documents WHERE audience=%s AND path=%s AND NOT deleted',
                           (self.scope.audience,path))
                 rows = records(c)
-                return rows[0] if rows else None
+                if not rows:return None
+                c.execute('SELECT message_id FROM brodar_v2.memory_sources WHERE audience=%s AND document_id=%s',(self.scope.audience,str(rows[0]['id'])))
+                rows[0]['source_ids']=[str(r[0]) for r in c.fetchall()]
+                return rows[0]
         return await self.db.run(op)
 
     async def memory_write(self, path: str, content: str, *, expected_revision: int,
                            reason: str, source_ids: list[str] | None = None,
-                           subject_ids: list[int] | None = None, confidence: str = 'observed'):
+                           subject_ids: list[int] | None = None, confidence: str = 'observed', reviewed_sources: dict[str,str] | None = None):
         """Create at revision 0; updating requires reading the current revision.
 
         Ordinary automatic learning has no approval step. Revisions and source
@@ -192,17 +195,22 @@ class ScopedStore:
                     if {str(r[0]) for r in c.fetchall()} != set(source_ids):
                         raise ValueError('Source messages must exist in this audience')
                 docid = str(old[0]) if old else str(uuid4())
+                c.execute('SELECT message_id FROM brodar_v2.memory_sources WHERE audience=%s AND document_id=%s',(self.scope.audience,docid))
+                linked=sorted(set(source_ids)|{str(r[0]) for r in c.fetchall()})
+                c.execute('SELECT id,content FROM brodar_v2.messages WHERE audience=%s AND id=ANY(%s::uuid[]) FOR SHARE',(self.scope.audience,linked))
+                evidence={str(uid):digest(body) for uid,body in c.fetchall()}
+                reviewed=bool(linked) and all((reviewed_sources or {}).get(uid)==evidence.get(uid) and uid in evidence for uid in linked)
                 revision = expected_revision+1
                 c.execute('INSERT INTO brodar_v2.memory_documents '
                           '(id,audience,path,content,revision,subject_ids,confidence) '
                           'VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(audience,path) DO UPDATE SET '
                           'content=excluded.content,revision=excluded.revision,subject_ids=excluded.subject_ids,'
-                          'confidence=excluded.confidence,deleted=false,needs_review=false,updated_at=now()',
-                          (docid,self.scope.audience,path,content,revision,subject_ids or [],confidence))
+                          'confidence=excluded.confidence,deleted=false,needs_review=brodar_v2.memory_documents.needs_review AND NOT %s,updated_at=now()',
+                          (docid,self.scope.audience,path,content,revision,subject_ids or [],confidence,reviewed))
                 c.execute('INSERT INTO brodar_v2.memory_revisions '
                           '(id,audience,document_id,revision,content,deleted,reason,metadata) VALUES (%s,%s,%s,%s,%s,false,%s,%s::jsonb)',
                           (str(uuid4()),self.scope.audience,docid,revision,content,reason,
-                           json.dumps({'subject_ids':subject_ids or [],'confidence':confidence})))
+                           json.dumps({'subject_ids':subject_ids or [],'confidence':confidence,'source_ids':linked})))
                 for src in source_ids:
                     c.execute('INSERT INTO brodar_v2.memory_sources(audience,document_id,message_id) '
                               'VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',(self.scope.audience,docid,src))

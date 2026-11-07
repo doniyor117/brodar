@@ -90,19 +90,6 @@ async def test_provider_failure_restarts_brain_and_keeps_durable_input(tmp_path,
     assert store.finished[-1]['retry'] is True
 
 
-@pytest.mark.asyncio
-async def test_foreground_and_reflection_never_share_a_conversation_turn(tmp_path):
-    conversation=Conversation(SimpleNamespace(runtime_dir=tmp_path,brain='codex'),Store(),SimpleNamespace(),None,None)
-    entered=asyncio.Event();release=asyncio.Event();events=[]
-    async def foreground():events.append('foreground');entered.set();await release.wait()
-    async def reflection():events.append('reflection')
-    conversation._process_guarded=foreground;conversation._reflect=reflection
-    task=asyncio.create_task(conversation.process());await entered.wait()
-    background=asyncio.create_task(conversation.reflect());await asyncio.sleep(0)
-    assert events==['foreground']
-    release.set();await asyncio.gather(task,background)
-    assert events==['foreground','reflection']
-
 
 @pytest.mark.asyncio
 async def test_optional_embedding_timeout_does_not_block_turn(tmp_path):

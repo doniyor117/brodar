@@ -319,20 +319,5 @@ class RuntimeStore(ScopedStore):
         return await self.db.run(op)
 
     async def messages_for_index(self,model,limit=20):
-        def op():
-            with self.db.transaction(self.scope.audience,readonly=True) as c:
-                c.execute("SELECT m.id,m.content,'message' AS kind FROM brodar_v2.messages m "
-                          "LEFT JOIN brodar_v2.embeddings e ON e.audience=m.audience AND e.source_id=m.id "
-                          "AND e.kind='message' AND e.model=%s WHERE m.audience=%s AND length(m.content) BETWEEN 1 AND 7000 "
-                          "AND (e.source_id IS NULL OR e.content_hash<>m.source_hash) ORDER BY m.received_at LIMIT %s",
-                          (model,self.scope.audience,max(1,min(limit,100))))
-                rows=records(c)
-                if len(rows)<limit:
-                    c.execute("SELECT m.id,m.content,'memory' AS kind FROM brodar_v2.memory_documents m "
-                              "LEFT JOIN brodar_v2.embeddings e ON e.audience=m.audience AND e.source_id=m.id "
-                              "AND e.kind='memory' AND e.model=%s WHERE m.audience=%s AND NOT m.deleted "
-                              "AND length(m.content) BETWEEN 1 AND 7000 AND e.source_id IS NULL "
-                              "ORDER BY m.updated_at LIMIT %s",(model,self.scope.audience,limit-len(rows)))
-                    rows.extend(records(c))
-                return rows
-        return await self.db.run(op)
+        from .learning import LearningStore
+        return await LearningStore(self.db,self.scope,lease_owner=self.lease_owner).index_candidates(model,limit)

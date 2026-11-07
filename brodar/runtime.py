@@ -24,7 +24,7 @@ from .mcp import ScopedMcpServer
 from .postgres import Postgres
 from .prompts import compose,envelope,authorized
 from .runtime_store import RuntimeStore
-from .learning import LearningStore,chunks
+from .learning import LearningStore,chunks,bounded_notes
 from .scope import Scope
 from .objects import ObjectStore
 from .artifacts import Artifacts
@@ -66,6 +66,7 @@ class Conversation:
         self._saved_session=None
         self.broker=ToolBroker(store,bot,embeddings=embeddings,artifacts=Artifacts(store,objects) if objects else None,
                                delivery_guard=delivery_guard,owner_ids=getattr(cfg,'owner_ids',()))
+        self.broker.recall_timeout=getattr(cfg,'recall_timeout_seconds',2.0)
         self.mcp=ScopedMcpServer(self.broker)
         self.brain=None
         self.revision=None
@@ -82,7 +83,12 @@ class Conversation:
         key=hashlib.sha256(store.scope.conversation.encode()).hexdigest()[:24]
         self.root=cfg.runtime_dir/'providers'/cfg.brain/key
 
-    async def start(self):
+    async def start(self, *, maintenance=False):
+        if maintenance:
+            from .mcp import build_tools
+            self.root=self.root/'maintenance'
+            self.broker.maintenance=True
+            self.mcp.mcp=build_tools(self.broker)
         await self.mcp.start()
         tools=['mcp__hamroh__'+t.name for t in await self.mcp.mcp.list_tools()]
         prompt,self.revision=compose(model=self.cfg.model,provider=self.cfg.brain,tools=tools,timezone=self.cfg.timezone)
@@ -107,15 +113,16 @@ class Conversation:
                 json_schema_path=self.root/'terminal.schema.json',cc_logs_dir=None,
                 hamroh_tool_names=tuple(t.name for t in await self.mcp.mcp.list_tools()))
             self.brain=ClaudeBrain(spec=spec,config=claude_worker_config(self.root),home=self.cfg.runtime_dir/'claude',cwd=self.root/'work')
-        session=await self.store.session_get(self.cfg.brain,self.revision)
+        session=None if maintenance else await self.store.session_get(self.cfg.brain,self.revision)
         try:
             await self.brain.start(session)
-            if self.brain.session_id:await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
+            if self.brain.session_id and not maintenance:await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
             self._saved_session=self.brain.session_id
         except BaseException:
             await self.brain.close()
             await self.mcp.close()
             raise
+        if maintenance:return
         self.task=asyncio.create_task(self.loop(),name='brodar-conversation')
         self.wake.set()
 
@@ -157,15 +164,6 @@ class Conversation:
         except Exception as exc:log.warning('Interrupt transport failed: %s',type(exc).__name__)
         return True
 
-    async def pause_reflection(self):
-        cap=self.broker.capability
-        if cap is not None and cap.mode=='reflection':
-            self.broker.end()
-            try:await self.brain.interrupt()
-            except Exception as exc:
-                log.warning('Background turn interrupt failed: %s',type(exc).__name__)
-                await self.brain.close()
-
     async def loop(self):
         while True:
             try:await asyncio.wait_for(self.wake.wait(),30)
@@ -178,7 +176,9 @@ class Conversation:
                 try:await asyncio.wait_for(self.direct.wait(),timeout=delay)
                 except asyncio.TimeoutError:pass
             self.direct.clear()
+            queued=time.monotonic()
             async with self.semaphore:
+                log.warning('Foreground semaphore_wait_ms=%d',int((time.monotonic()-queued)*1000))
                 try:
                     await self.process()
                 except asyncio.CancelledError:raise
@@ -301,7 +301,7 @@ class Conversation:
         if any(r['status'] in {'sending','uncertain'} for r in prior):
             await self.store.finish_inputs([r['id'] for r in batch],error='previous_delivery_uncertain',job_id=turn_id)
             return
-        payload=envelope(messages,context=context,notes=notes,receipts=prior)
+        payload=envelope(messages,context=context,notes=bounded_notes(notes),receipts=prior)
         artifacts=bundle['artifacts']
         if work['checkpoint'] or artifacts:
             from xml.sax.saxutils import escape
@@ -309,14 +309,14 @@ class Conversation:
         outcome=None
         receipts=prior
         prep_seconds=time.monotonic()-prep_started
-        if prep_seconds>10:log.warning('Slow foreground preparation: %.1f seconds',prep_seconds)
+        log.warning('Foreground preparation_ms=%d turn=%s',int(prep_seconds*1000),self._turn_id)
         try:
             for continuation in range(4):
                 if self._cancelled:break
                 self._accept_steer=True
                 provider_started=time.monotonic()
                 outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),timeout=600)
-                log.info('Foreground provider turn seconds=%.2f continuation=%s status=%s',time.monotonic()-provider_started,continuation,outcome.status)
+                log.warning('Foreground provider turn seconds=%.2f continuation=%s status=%s',time.monotonic()-provider_started,continuation,outcome.status)
                 async with self._steer_lock:self._accept_steer=False
                 if self.brain.session_id and self.brain.session_id!=self._saved_session:
                     await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
@@ -375,39 +375,6 @@ class Conversation:
         if self.brain:await self.brain.close()
         await self.mcp.close()
 
-    async def reflect(self):
-        async with self._turn_lock:await self._reflect()
-
-    async def _reflect(self):
-        batch=await self.store.reflection_batch()
-        if not batch:return
-        # Bound each context presentation and only advance over presented rows.
-        selected=[]
-        size=0
-        for row in batch:
-            if selected and size+len(row['content'])>30000:break
-            selected.append(row)
-            size+=len(row['content'])
-        turn_id=str(uuid5(NAMESPACE_URL,'reflection:'+self.store.scope.audience+':'+str(selected[-1]['id'])))
-        self.broker.begin(TurnCapability(turn_id,mode='reflection'))
-        try:
-            payload=('This is a private maintenance turn, not a new group request. Learn from these archived experiences and feedback. '
-                'Create, correct, merge or retire useful supplementary context notes; link source UUIDs. '
-                'Do not turn jokes into certain facts. You may learn writing advice, relationships, interests, project state and task methods. '
-                'Keep the main persona fixed. No Telegram delivery is allowed in this turn. When finished, return action skip with a short reason.\n'
-                +envelope([],context=selected,notes=await self.store.memory_list(40)))
-            outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),600)
-            if outcome.status=='completed' and outcome.action in {'skip','stop'}:
-                await self.store.reflection_finish(selected[-1])
-            if self.brain.session_id and self.brain.session_id!=self._saved_session:
-                await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
-                self._saved_session=self.brain.session_id
-        except asyncio.TimeoutError:
-            self.broker.end()
-            await self.brain.close()
-            await self.brain.start(self.brain.session_id)
-            raise
-        finally:self.broker.end()
 
 
 async def run(cfg):
@@ -445,27 +412,27 @@ async def run(cfg):
                 if pending.done() and creating.get(key) is pending:creating.pop(key,None)
         return conversations[key]
 
+    from .reflection import Maintenance
+    async def make_worker(scope):
+        return Conversation(cfg,LearningStore(learning_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,
+                            delivery_guard=lease.require)
+    learning=Maintenance(cfg,make_worker,semaphore,
+        lambda:any(c.wake.is_set() or c.inflight for c in conversations.values()))
+
     async def maintain(bot_id):
         while True:
             for chat_id in cfg.allowed_chats:
                 scope=Scope(bot_id,chat_id,instance_id=cfg.instance_id)
-                store=LearningStore(learning_db,scope)
-                if embeddings:
+                store=LearningStore(learning_db,scope,lease_owner=lease.owner)
+                if embeddings and time.monotonic()>=learning.index_retry_at:
                     try:
                         for row in await store.index_candidates(embeddings.model):
-                            vectors=[await embeddings.embed(part) for part in chunks(row['content'])]
+                            vectors=[await asyncio.wait_for(embeddings.embed(part),10) for part in chunks(row['content'])]
                             await store.index_document(row['kind'],str(row['id']),row['content'],vectors,embeddings.model)
-                    except EmbeddingError as exc:
-                        log.warning('Embedding indexing deferred: %s',type(exc).__name__)
-                        await asyncio.sleep(60)
-                    except Exception as exc:log.warning('Index maintenance deferred: %s',type(exc).__name__)
-                try:
-                    batch=await store.reflection_batch()
-                    if batch and not semaphore.locked() and not any(c.wake.is_set() or c.inflight for c in conversations.values()):
-                        async with semaphore:
-                            conversation=await get_conversation(scope)
-                            await conversation.reflect()
-                except Exception as exc:log.warning('Reflection deferred: %s',type(exc).__name__)
+                    except Exception as exc:
+                        log.warning('Index maintenance deferred: %s',type(exc).__name__)
+                        learning.index_retry_at=time.monotonic()+60
+                if cfg.learning_enabled:await learning.run(scope)
             await asyncio.sleep(60)
 
     maintenance=None
@@ -553,7 +520,7 @@ async def run(cfg):
                         if existing is None or (not existing.inflight and not existing.wake.is_set()):await presence.stop(scope)
                     if new and not service:
                         if not (sender and sender.is_bot):
-                            for current in list(conversations.values()):await current.pause_reflection()
+                            learning.preempt()
                         conversation=await get_conversation(scope)
                         if text.split('@',1)[0].strip()=='/cancel' and sender:
                             await conversation.cancel(sender.id)
@@ -580,6 +547,7 @@ async def run(cfg):
         if heartbeat:
             heartbeat.cancel()
             await asyncio.gather(heartbeat,return_exceptions=True)
+        learning.preempt()
         if maintenance:
             maintenance.cancel()
             await asyncio.gather(maintenance,return_exceptions=True)

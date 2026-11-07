@@ -23,7 +23,7 @@ class LearningStore(RuntimeStore):
                     "'parents',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT DISTINCT ON(id) * FROM chain WHERE depth>0 ORDER BY id,depth) t),"
                     "'notes',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id,path,left(content,3000) AS content,"
                     "length(content)>3000 AS truncated,revision,subject_ids,confidence,updated_at FROM brodar_v2.memory_documents "
-                    "WHERE audience=%s AND NOT deleted AND NOT needs_review ORDER BY CASE WHEN subject_ids && "
+                    "WHERE audience=%s AND NOT deleted AND NOT needs_review ORDER BY CASE WHEN path='context/overview.md' THEN 0 ELSE 1 END,CASE WHEN subject_ids && "
                     "ARRAY(SELECT sender_id FROM inputs WHERE sender_id IS NOT NULL) THEN 0 ELSE 1 END,"
                     "CASE WHEN path LIKE 'context/group/%%' OR path='context/overview.md' THEN 0 ELSE 1 END,updated_at DESC LIMIT 12) t),"
                     "'receipts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id,tool_call_id,method,status,response,request "
@@ -38,12 +38,7 @@ class LearningStore(RuntimeStore):
                 seen={row['id'] for row in bundle['messages']+bundle['context']}
                 for parent in bundle.pop('parents'):
                     if parent['id'] not in seen:bundle['context'].append(parent);seen.add(parent['id'])
-                remaining=14000;notes=[]
-                for note in bundle['notes']:
-                    if remaining<=0:break
-                    if len(note['content'])>remaining:note['truncated']=True
-                    note['content']=note['content'][:remaining];remaining-=len(note['content']);notes.append(note)
-                bundle['notes']=notes
+                bundle['notes']=bounded_notes(bundle['notes'])
                 return bundle
         return await self.db.run(op)
 
@@ -52,18 +47,11 @@ class LearningStore(RuntimeStore):
             with self.db.transaction(self.scope.audience,readonly=True) as c:
                 c.execute('SELECT id,path,content,revision,subject_ids,confidence,updated_at '
                     'FROM brodar_v2.memory_documents WHERE audience=%s AND NOT deleted AND NOT needs_review '
-                    'ORDER BY CASE WHEN subject_ids && %s::bigint[] THEN 0 ELSE 1 END,'
+                    "ORDER BY CASE WHEN path='context/overview.md' THEN 0 ELSE 1 END,CASE WHEN subject_ids && %s::bigint[] THEN 0 ELSE 1 END,"
                     "CASE WHEN path LIKE 'context/group/%%' OR path='context/overview.md' THEN 0 ELSE 1 END,"
                     'updated_at DESC LIMIT %s',(self.scope.audience,list(speaker_ids),limit))
                 rows=records(c)
-                selected=[]
-                remaining=14000
-                for row in rows:
-                    if remaining<=0:break
-                    full=row['content'];row['content']=full[:min(3000,remaining)]
-                    row['truncated']=len(row['content'])<len(full)
-                    remaining-=len(row['content']);selected.append(row)
-                return selected
+                return bounded_notes(rows)
         return await self.db.run(op)
 
     async def has_index(self,model):
@@ -94,7 +82,7 @@ class LearningStore(RuntimeStore):
         # than invent historical certainty. Existing source links remain conservative.
         metadata=old['metadata'] or {'subject_ids':old['current_subject_ids'],'confidence':old['current_confidence']}
         return await self.memory_write(path,old['content'],expected_revision=expected_revision,reason=reason,
-                                       subject_ids=metadata['subject_ids'],confidence=metadata['confidence'])
+                                       subject_ids=metadata['subject_ids'],confidence=metadata['confidence'],source_ids=metadata.get('source_ids',[]))
 
     async def memory_forget(self,path,*,expected_revision):
         path=context_path(path)
@@ -152,7 +140,7 @@ class LearningStore(RuntimeStore):
                     "WHERE m.audience=%s AND m.content<>'' AND NOT EXISTS (SELECT 1 FROM brodar_v2.embeddings e "
                     "WHERE e.audience=m.audience AND e.source_id=m.id AND e.kind='message' AND e.model=%s "
                     "AND e.content_hash=m.source_hash) ORDER BY m.received_at LIMIT %s",(self.scope.audience,model,limit))
-                rows=records(c)
+                rows=records(c)[:max(1,limit-2)]
                 if len(rows)<limit:
                     c.execute("SELECT m.id,m.content,'memory' AS kind FROM brodar_v2.memory_documents m WHERE m.audience=%s "
                         "AND NOT m.deleted AND NOT m.needs_review AND m.content<>'' AND NOT EXISTS (SELECT 1 FROM brodar_v2.embeddings e "
@@ -184,6 +172,94 @@ class LearningStore(RuntimeStore):
         return await self.db.run(op)
 
 
+    async def maintenance_prepare(self,consolidation=False,interval=21600):
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR SHARE',(self.scope.bot_id,self.lease_owner))
+                    if not c.fetchone():raise PermissionError('Maintenance consumer lease expired')
+                c.execute("INSERT INTO brodar_v2.reflection_state(audience) VALUES (%s) ON CONFLICT DO NOTHING",(self.scope.audience,))
+                c.execute("SELECT *,consolidation_at IS NULL OR consolidation_at<now()-(%s * interval '1 second') AS consolidate FROM brodar_v2.reflection_state WHERE audience=%s FOR UPDATE",(interval,self.scope.audience))
+                state=records(c)[0]
+                c.execute("SELECT * FROM brodar_v2.messages WHERE audience=%s AND ((changed_at,id)>(%s,%s::uuid) OR (id=%s::uuid AND %s>0)) ORDER BY changed_at,id LIMIT 50",
+                    (self.scope.audience,state['last_received_at'],str(state['last_id']),str(state['last_id']),state['chunk_offset']))
+                rows=records(c)
+                kind='incremental';notes=[];selected=[];remaining=30000;offset=0
+                if len(rows)<20 and not state['chunk_offset']:
+                    c.execute("SELECT %s::timestamptz<now()-interval '1 hour'",(state['last_run_at'],))
+                    if not c.fetchone()[0]:rows=[]
+                if consolidation and state['consolidate']:rows=[]
+                for row in rows:
+                    begin=state['chunk_offset'] if str(row['id'])==str(state['last_id']) and row['changed_at']==state['last_received_at'] else 0
+                    content=row['content'][begin:]
+                    take=min(len(content),remaining)
+                    selected.append(dict(row,content=content[:take],chunk_start=begin,chunk_end=begin+take,content_length=len(row['content'])))
+                    offset=begin+take if take<len(content) else 0
+                    remaining-=take
+                    if remaining<=0:break
+                if not selected and consolidation and state['consolidate']:
+                    kind='consolidation'
+                    c.execute("SELECT * FROM brodar_v2.memory_documents WHERE audience=%s AND NOT deleted ORDER BY last_maintained_at NULLS FIRST,needs_review DESC,updated_at,id LIMIT 8",(self.scope.audience,))
+                    notes=records(c)
+                    if not notes:
+                        c.execute('UPDATE brodar_v2.reflection_state SET consolidation_at=now() WHERE audience=%s',(self.scope.audience,))
+                        return None
+                    # Bound full documents individually; tools can retrieve the rest.
+                    notes=[dict(n,content=n['content'][:3000]) for n in notes]
+                elif not selected:return None
+                uid=str(uuid4())
+                manifest=[{'id':str(r['id']),'changed_at':str(r['changed_at']),'chunk_start':r['chunk_start'],'chunk_end':r['chunk_end']} for r in selected]
+                c.execute("DELETE FROM brodar_v2.maintenance_runs WHERE audience=%s AND started_at<now()-interval '30 days'",(self.scope.audience,))
+                c.execute("UPDATE brodar_v2.maintenance_runs SET status='interrupted',finished_at=now() WHERE audience=%s AND status='running'",(self.scope.audience,))
+                c.execute("INSERT INTO brodar_v2.maintenance_runs(id,audience,owner,kind,input_manifest) VALUES (%s,%s,%s,%s,%s::jsonb)",
+                    (uid,self.scope.audience,str(self.lease_owner),kind,json.dumps(manifest)))
+                return {'id':uid,'kind':kind,'messages':selected,'notes':notes,'offset':offset,'state':state}
+        return await self.db.run(op)
+
+    async def maintenance_end(self,run,status):
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                c.execute("UPDATE brodar_v2.maintenance_runs SET status=%s,finished_at=now() WHERE audience=%s AND id=%s AND owner=%s AND status='running'",(status,self.scope.audience,run['id'],str(self.lease_owner)))
+        await self.db.run(op)
+
+    async def maintenance_finish(self,run):
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR SHARE',(self.scope.bot_id,self.lease_owner))
+                    if not c.fetchone():raise PermissionError('Maintenance consumer lease expired')
+                # Lock and verify the exact evidence versions before checkpointing.
+                for row in run['messages']:
+                    c.execute('SELECT changed_at FROM brodar_v2.messages WHERE audience=%s AND id=%s FOR SHARE',(self.scope.audience,str(row['id'])))
+                    current=c.fetchone()
+                    if not current or current[0]!=row['changed_at']:raise RevisionConflict('Maintenance evidence changed')
+                if run['kind']=='incremental':
+                    last=run['messages'][-1];state=run['state']
+                    c.execute('UPDATE brodar_v2.reflection_state SET last_received_at=%s,last_id=%s,chunk_offset=%s,last_run_at=now() WHERE audience=%s AND last_received_at=%s AND last_id=%s AND chunk_offset=%s',
+                        (last['changed_at'],str(last['id']),run['offset'],self.scope.audience,state['last_received_at'],str(state['last_id']),state['chunk_offset']))
+                    if c.rowcount!=1:raise RevisionConflict('Maintenance cursor changed')
+                else:
+                    for note in run['notes']:
+                        c.execute('UPDATE brodar_v2.memory_documents SET last_maintained_at=now() WHERE audience=%s AND id=%s',(self.scope.audience,str(note['id'])))
+                    c.execute('UPDATE brodar_v2.reflection_state SET consolidation_at=now() WHERE audience=%s',(self.scope.audience,))
+                c.execute("UPDATE brodar_v2.maintenance_runs SET status='completed',finished_at=now(),outcome='processed',changed_revisions=%s::jsonb WHERE audience=%s AND id=%s AND owner=%s AND status='running'",
+                    (json.dumps(run.get('changes',[])),self.scope.audience,run['id'],str(self.lease_owner)))
+                if c.rowcount!=1:raise RevisionConflict('Maintenance ownership changed')
+        await self.db.run(op)
+
+
 def chunks(text,size=1800,overlap=120):
     if size<=overlap or overlap<0:raise ValueError('Invalid chunk sizes')
     return [text[start:start+size] for start in range(0,len(text),size-overlap)]
+
+
+def bounded_notes(rows,budget=14000):
+    result=[]
+    for row in sorted(rows,key=lambda r:0 if r.get('path')=='context/overview.md' else 1):
+        if budget<=0:break
+        row=dict(row);full=row.get('content') or ''
+        size=min(budget,2000 if row.get('path')=='context/overview.md' else 3000)
+        row['content']=full[:size]
+        row['truncated']=bool(row.get('truncated')) or len(full)>size
+        budget-=len(row['content']);result.append(row)
+    return result

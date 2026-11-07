@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass,field
 import secrets
+import time
+import logging
 from uuid import UUID
 
 from telegram.error import BadRequest,Forbidden,NetworkError,RetryAfter
@@ -30,6 +32,9 @@ class ToolBroker:
         self.owner_ids=owner_ids
         self.capability=None
         self._reads={}
+        self._source_reads=set()
+        self._checked_sources={}
+        self._memory_changes=[]
         self._delivery_lock=asyncio.Lock()
         self._moderation_requests={}
         self._requests={}
@@ -38,7 +43,12 @@ class ToolBroker:
         if self.capability is not None:raise RuntimeError('Previous capability is still active')
         UUID(capability.turn_id)
         self.capability=capability
+        self._turn_started=time.monotonic()
+        self._first_delivery=False
         self._reads.clear()
+        self._source_reads.clear()
+        self._checked_sources.clear()
+        self._memory_changes.clear()
         self.accept_moderation_requests(moderation_requests)
         self.accept_requests(requests)
 
@@ -56,6 +66,9 @@ class ToolBroker:
     def end(self):
         self.capability=None
         self._reads.clear()
+        self._source_reads.clear()
+        self._checked_sources.clear()
+        self._memory_changes.clear()
         self._moderation_requests.clear()
         self._requests.clear()
 
@@ -217,6 +230,9 @@ class ToolBroker:
                 await self.store.delivery_finish(receipt['id'],'uncertain',{'error':'unexpected_telegram_result'})
                 raise RuntimeError('Unexpected Telegram response; delivery outcome is uncertain')
             await self.store.delivery_finish(receipt['id'],'sent',result)
+            if not self._first_delivery:
+                self._first_delivery=True
+                logging.getLogger('brodar.metrics').warning('First delivery_ms=%d turn=%s',int((time.monotonic()-self._turn_started)*1000),self.capability.turn_id if self.capability else 'revoked')
             return result
 
     async def send_document(self,artifact_id,caption,call_id):
@@ -262,14 +278,24 @@ class ToolBroker:
         vector=None
         if self.embeddings:
             from .embeddings import EmbeddingError
-            try:vector=await self.embeddings.embed(query,query=True)
-            except (EmbeddingError,ValueError):pass  # lexical search remains useful during quota/network/size failures
+            try:vector=await asyncio.wait_for(self.embeddings.embed(query,query=True),getattr(self,'recall_timeout',2.0))
+            except (EmbeddingError,ValueError,asyncio.TimeoutError):pass  # lexical search remains useful during quota/network/size failures
         return await self.store.search(query,vector=vector,limit=limit)
 
+    async def history_get(self,ids):
+        cap=self.require()
+        rows=await self.store.history_get(ids)
+        if self.capability is not cap:raise PermissionError('Reading turn ended')
+        from .store import digest
+        self._checked_sources.update({str(r['id']):digest(r['content']) for r in rows})
+        return rows
+
     async def memory_read(self,path):
-        self.require()
+        cap=self.require()
         note=await self.store.memory_read(path)
+        if self.capability is not cap:raise PermissionError('Reading turn ended')
         self._reads[path]=note['revision'] if note else 0
+        if note:self._source_reads.update(note.get('source_ids',[]))
         return note
 
     @guarded_write
@@ -278,8 +304,9 @@ class ToolBroker:
         if expected_revision and self._reads.get(path)!=expected_revision:
             raise RevisionConflict('Read this context document in the current turn before editing')
         result=await self.store.memory_write(path,content,expected_revision=expected_revision,reason=reason,
-            source_ids=source_ids,subject_ids=subject_ids,confidence=confidence)
+            reviewed_sources=dict(self._checked_sources),source_ids=sorted(set(source_ids or [])|self._source_reads),subject_ids=subject_ids,confidence=confidence)
         self._reads[path]=result['revision']
+        self._memory_changes.append({'path':path,'revision':result['revision']})
         return result
 
     @guarded_write
@@ -305,6 +332,7 @@ class ToolBroker:
         self.require_read(path,expected_revision)
         result=await self.store.memory_restore(path,revision,expected_revision=expected_revision,reason=reason)
         self._reads[path]=result['revision']
+        self._memory_changes.append({'path':path,'revision':result['revision']})
         return result
 
     @guarded_write
