@@ -29,16 +29,25 @@ def public_payload(value):
 
 def describe_message(message):
     """Return useful text and whether this is a service event, not a chat turn."""
-    if message.get('text') is not None:return message['text'],False
-    if message.get('caption') is not None:return message['caption'],False
-    if message.get('photo'):return '[photo received]',False
-    if message.get('document'):return '[document received: '+message['document'].get('file_name','document')+']',False
-    if message.get('sticker'):return '[sticker: '+message['sticker'].get('emoji','no emoji metadata')+']',False
+    reference=''
+    for kind in ['photo','document','sticker','voice','audio','video','video_note','animation']:
+        item=message.get(kind)
+        if isinstance(item,list):item=item[-1] if item else None
+        if isinstance(item,dict) and item.get('file_id'):
+            reference='\n[Telegram '+kind+'; file_id: '+item['file_id']
+            if item.get('file_size') is not None:reference+='; bytes: '+str(item['file_size'])
+            reference+='; import with telegram_media_lookup(kind=import_file) when needed]'
+            break
+    if message.get('text') is not None:return message['text']+reference,False
+    if message.get('caption') is not None:return message['caption']+reference,False
+    if message.get('photo'):return '[photo received]'+reference,False
+    if message.get('document'):return '[document received: '+message['document'].get('file_name','document')+']'+reference,False
+    if message.get('sticker'):return '[sticker: '+message['sticker'].get('emoji','no emoji metadata')+']'+reference,False
     if message.get('poll'):
         poll=message['poll'];return '[poll: '+poll.get('question','')+'; '+', '.join(option.get('text','') for option in poll.get('options',[]))+']',False
     if message.get('dice'):return '[dice: '+str(message['dice'].get('emoji',''))+' '+str(message['dice'].get('value',''))+']',False
     for kind in ['voice','audio','video','video_note','animation']:
-        if message.get(kind):return '['+kind+' received; no transcript or visual interpretation available]',False
+        if message.get(kind):return '['+kind+' received; no transcript or visual interpretation available]'+reference,False
     for kind in ['contact','location','venue']:
         if message.get(kind):return '['+kind+' shared: '+str(message[kind])+']',False
     fields=['new_chat_members','left_chat_member','new_chat_title','new_chat_photo','delete_chat_photo',

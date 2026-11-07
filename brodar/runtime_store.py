@@ -16,7 +16,7 @@ class RuntimeStore(ScopedStore):
         The consumer row serializes allocation of negative internal update IDs.
         Ordinary Telegram update IDs are nonnegative. No sender is impersonated.
         """
-        source_id=f'{task["id"]}:{task["generation"]}'
+        source_id=f'{task["id"]}:{task["generation"]}:{task.get("result_version",0)}'
         mid=str(uuid5(NAMESPACE_URL,self.scope.audience+':research:'+source_id))
         iid=str(uuid5(NAMESPACE_URL,self.scope.audience+':research-input:'+source_id))
         content=scrub(content)
@@ -36,7 +36,7 @@ class RuntimeStore(ScopedStore):
                           "VALUES (%s,%s,%s,'Hyper Researcher','tool',%s,'research',%s,%s) ON CONFLICT DO NOTHING",
                           (mid,self.scope.audience,self.scope.topic_id,content,source_id,digest(content)))
                 payload={'internal_research':{'task_id':str(task['id']),'generation':task['generation'],
-                    'requester_id':task['requester_id'],'status':task['status']}}
+                    'requester_id':task['requester_id'],'status':task['status'],'result_version':task.get('result_version',0)}}
                 c.execute('INSERT INTO brodar_v2.inbox(id,audience,topic_id,bot_id,update_id,message_id,payload) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)',
                           (iid,self.scope.audience,self.scope.topic_id,self.scope.bot_id,update_id,mid,json.dumps(payload)))
                 return update_id,True
@@ -295,6 +295,30 @@ class RuntimeStore(ScopedStore):
             with self.db.transaction(self.scope.audience) as c:
                 c.execute('UPDATE brodar_v2.deliveries SET status=%s,response=%s::jsonb,updated_at=now() '
                           'WHERE audience=%s AND id=%s',(status,json.dumps(response,default=str),self.scope.audience,str(uid)))
+                if status=='sent' and (response.get('message_id') or response.get('message_ids')):
+                    c.execute('SELECT method,request FROM brodar_v2.deliveries WHERE audience=%s AND id=%s',(self.scope.audience,str(uid)))
+                    media_delivery=c.fetchone()
+                    native={'send_photo','send_video','send_animation','send_audio','send_voice','send_video_note','send_sticker','send_media_group','send_location','send_venue','send_contact','send_dice','copy_message','forward_message'}
+                    if media_delivery and media_delivery[0] in native:
+                        method,request=media_delivery
+                        entries=request.get('items') if method=='send_media_group' else [request]
+                        message_ids=response.get('message_ids') or [response['message_id']]
+                        if len(entries)!=len(message_ids):raise ValueError('Telegram album receipt count mismatch')
+                        for platform_id,item in zip(message_ids,entries):
+                            kind=item.get('kind') or method.removeprefix('send_')
+                            text=item.get('caption','')+'\n['+kind
+                            if item.get('artifact_id'):text+='; artifact_id: '+str(item['artifact_id'])
+                            if item.get('file_id'):text+='; file_id: '+item['file_id']
+                            if item.get('url'):text+='; url: '+item['url']
+                            if method in {'send_location','send_venue'}:text+='; latitude: '+str(item.get('latitude'))+'; longitude: '+str(item.get('longitude'))
+                            if method=='send_venue':text+='; '+item.get('title','')+'; '+item.get('address','')
+                            if method=='send_contact':text+='; '+item.get('first_name','')+' '+item.get('last_name','')
+                            text+=']'
+                            mid=str(uuid5(NAMESPACE_URL,f'{self.scope.audience}:telegram:{platform_id}'))
+                            c.execute("INSERT INTO brodar_v2.messages(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,sent_at,reply_to_id,source_id,source_hash,metadata) "
+                                      "VALUES (%s,%s,%s,%s,%s,'brodar','assistant',%s,now(),%s,%s,%s,%s::jsonb) ON CONFLICT(audience,source,source_id) DO NOTHING",
+                                      (mid,self.scope.audience,self.scope.topic_id,platform_id,self.scope.bot_id,text,request.get('reply_to_message_id'),str(platform_id),digest(text),
+                                       json.dumps({'media_kind':kind,'artifact_id':item.get('artifact_id')})))
                 if status=='sent' and response.get('message_id'):
                     c.execute('SELECT method,request FROM brodar_v2.deliveries WHERE audience=%s AND id=%s',
                               (self.scope.audience,str(uid)))
@@ -327,6 +351,27 @@ class RuntimeStore(ScopedStore):
                             mid=str(changed[0])
                             c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='message' AND source_id=%s",
                                       (self.scope.audience,mid))
+                            c.execute('UPDATE brodar_v2.memory_documents SET needs_review=true WHERE audience=%s AND id IN '
+                                      '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                                      (self.scope.audience,self.scope.audience,mid))
+                            c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='memory' AND source_id IN "
+                                      '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
+                                      (self.scope.audience,self.scope.audience,mid))
+                    if delivery and delivery[0]=='edit_message_caption':
+                        message_id=delivery[1]['message_id'];caption=delivery[1].get('caption','')
+                        c.execute('SELECT metadata FROM brodar_v2.messages WHERE audience=%s AND platform_message_id=%s AND sender_id=%s',
+                                  (self.scope.audience,message_id,self.scope.bot_id))
+                        original=c.fetchone();metadata=original[0] if original else {}
+                        content=caption+'\n['+metadata.get('media_kind','media')
+                        if metadata.get('artifact_id'):content+='; artifact_id: '+metadata['artifact_id']
+                        content+=']'
+                        c.execute('UPDATE brodar_v2.messages SET content=%s,edited_at=now(),changed_at=now(),source_hash=%s '
+                                  'WHERE audience=%s AND platform_message_id=%s AND sender_id=%s RETURNING id',
+                                  (content,digest(content),self.scope.audience,message_id,self.scope.bot_id))
+                        changed=c.fetchone()
+                        if changed:
+                            mid=str(changed[0])
+                            c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='message' AND source_id=%s",(self.scope.audience,mid))
                             c.execute('UPDATE brodar_v2.memory_documents SET needs_review=true WHERE audience=%s AND id IN '
                                       '(SELECT document_id FROM brodar_v2.memory_sources WHERE audience=%s AND message_id=%s)',
                                       (self.scope.audience,self.scope.audience,mid))

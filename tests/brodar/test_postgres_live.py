@@ -68,6 +68,20 @@ async def test_research_jobs_recovery_private_events_and_interaction_limit(store
         with pytest.raises(PermissionError):await jobs.follow_up(uid,'eleventh request','follow-2')
         # An old operation replay is still idempotent after later transitions.
         assert (await jobs.follow_up(uid,'one more source','follow-1'))['interactions']==10
+        # Waiting for a platform approval and the later report each notify once.
+        second_id=str(uuid4())
+        await jobs.enqueue(**dict(arguments,task_id=second_id,operation='approval-task'))
+        second_row=(await jobs.claim())[0]
+        await jobs.submitting(second_row)
+        await jobs.update(second_row,status='waiting',remote_thread_id='approval-thread',last_result_id='awaiting_approval',
+            result={'status':'blocked','report':'approval required','result_id':'awaiting_approval'})
+        paused=next(r for r in await jobs.notifications() if str(r['id'])==second_id)
+        await jobs.notified(paused)
+        assert all(str(r['id'])!=second_id for r in await jobs.notifications())
+        await jobs.update(second_row,status='complete',last_result_id='final-report',
+            result={'status':'complete','report':'finished','result_id':'final-report'})
+        completed=next(r for r in await jobs.notifications() if str(r['id'])==second_id)
+        assert completed['result_version']>paused['result_version']
     finally:
         await lease.release()
         def clean():
@@ -88,7 +102,7 @@ async def stores():
     def cleanup():
         for s in [a,b]:
             with db.transaction(s.scope.audience) as c:
-                for table in ['approvals','maintenance_runs','reflection_state','memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources','jobs']:
+                for table in ['approvals','maintenance_runs','reflection_state','memory_sources','memory_revisions','memory_documents','embeddings','deliveries','artifacts','tool_calls','inbox','messages','sessions','forgotten_sources','jobs']:
                     c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(s.scope.audience,))
                 c.execute('DELETE FROM brodar_v2.poll_state WHERE bot_id=%s',(bot_id,))
                 c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(s.scope.audience,))
@@ -99,6 +113,38 @@ async def stores():
 async def add(store,text,update=1):
     return await store.ingest(update_id=update,message_id=update,sender_id=42,
         sender_name='test',text=text,timestamp=datetime.now(timezone.utc),payload={'test':True})
+
+
+@pytest.mark.asyncio
+async def test_native_media_album_and_caption_edit_archive(stores):
+    from types import SimpleNamespace
+    from brodar.runtime_store import RuntimeStore
+    from brodar.broker import ToolBroker,TurnCapability
+    from brodar.telegram_media import send_media,send_album,chat_action
+    a,b=stores
+    store=RuntimeStore(a.db,a.scope)
+    class Bot:
+        username='BrodarBot'
+        async def send_photo(self,**kw):return SimpleNamespace(message_id=1001)
+        async def send_media_group(self,**kw):return (SimpleNamespace(message_id=1002),SimpleNamespace(message_id=1003))
+        async def edit_message_caption(self,**kw):return SimpleNamespace(message_id=kw['message_id'])
+    broker=ToolBroker(store,Bot())
+    broker.begin(TurnCapability(str(uuid4()),requester_id=42))
+    await send_media(broker,'photo','file:real_file_123','original caption','photo')
+    await send_album(broker,[{'kind':'photo','media':'file:real_file_456','caption':'first'},
+        {'kind':'video','media':'file:real_file_789','caption':'second'}],'album')
+    await chat_action(broker,'edit_caption',{'message_id':1001,'caption':'corrected caption'},'edit')
+    rows=await store.recent()
+    assert len(rows)==3
+    photo=next(r for r in rows if r['platform_message_id']==1001)
+    assert photo['content']=='corrected caption\n[photo]'
+    from brodar.store import digest
+    assert photo['source_hash']==digest(photo['content'])
+    assert {r['platform_message_id'] for r in rows}=={1001,1002,1003}
+    assert all(r['role']=='assistant' and r['sender_id']==a.scope.bot_id for r in rows)
+    assert await b.recent()==[]
+    receipts=await store.delivery_receipts(broker.capability.turn_id)
+    assert next(r for r in receipts if r['method']=='send_media_group')['response']['message_ids']==[1002,1003]
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,17 @@ class Brain:
 
 
 @pytest.mark.asyncio
+async def test_unaddressed_group_media_is_not_downloaded_in_foreground(tmp_path):
+    store=Store();cfg=SimpleNamespace(runtime_dir=tmp_path,brain='codex')
+    class Files:
+        async def get_record(self,*args):raise AssertionError('Ambient media must stay lazy')
+    conversation=Conversation(cfg,store,SimpleNamespace(username='BrodarBot'),None,None)
+    conversation.broker.artifacts=Files()
+    row=dict(store.row,payload={'message':{'chat':{'id':-100,'type':'supergroup'},'from':{'id':42},'photo':[{'file_id':'file','file_size':100}]}})
+    await conversation.materialize([row])
+
+
+@pytest.mark.asyncio
 async def test_queued_research_can_yield_without_delivery_repair_or_retry(tmp_path):
     store=Store();cfg=SimpleNamespace(runtime_dir=tmp_path,brain='codex')
     conversation=Conversation(cfg,store,SimpleNamespace(),None,None)

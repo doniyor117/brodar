@@ -24,3 +24,9 @@ def test_service_events_do_not_masquerade_as_unreadable_attachments():
     assert service and 'delete_chat_photo' in text and 'attachment' not in text
     assert describe_message({'text':'yo','group_chat_created':False})==('yo',False)
     assert describe_message({'sticker':{'emoji':'💀'},'delete_chat_photo':False})==('[sticker: 💀]',False)
+
+
+def test_captioned_media_keeps_safe_file_reference_for_lazy_import():
+    text,service=describe_message({'caption':'look at this','photo':[{'file_id':'actualCaseSensitiveID','file_size':12345}]})
+    assert text.startswith('look at this') and 'actualCaseSensitiveID' in text and not service
+    assert 'bytes: 12345' in text and 'import_file' in text

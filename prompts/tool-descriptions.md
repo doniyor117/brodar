@@ -175,3 +175,19 @@ Compatibility delivery helper for a real research task belonging to the current 
 ## group_send_document
 
 Deliver an actual non-sensitive artifact from the current audience to an approved group/topic, copying it into that destination's durable storage and recording both deliveries. Sensitive-read consent alone cannot authorize cross-group disclosure.
+
+## telegram_send_media
+
+Send native Telegram photo, video, animation (GIF), audio (music), voice (voice note), video_note (round video), sticker or document. media is artifact:UUID for a workspace file, file:TELEGRAM_FILE_ID to reuse Telegram media, or a public HTTPS media URL. Choose photo for images, not document unless a file is requested. Stickers/video notes have no captions; video notes do not support URLs. Optional chat_id/topic_id routes to an approved group, then report back in the origin. options supports applicable metadata (title/performer/duration/width/height/length), has_spoiler, supports_streaming, show_caption_above_media, parse_mode, disable_notification, protect_content, and URL-only buttons as [[{text,url}]]. Set final=false for progress. No local file paths, invented file IDs or pretend generation.
+
+## telegram_send_album
+
+Send a native media album of 2..10 items in this conversation. Each item has kind, media (artifact:UUID, file:FILE_ID or HTTPS URL), optional caption/options. Mix photos/videos, or use audio-only or document-only albums. Uploaded bytes total at most 100 MB per album on this phone. Telegram supplies all message IDs; do not resend an uncertain album. Final defaults true. Delivering an artifact as photo/audio/album counts as delivering the actual file.
+
+## telegram_chat_action
+
+Use native current-chat actions with structured parameters. location: latitude/longitude and optional live_period/heading/horizontal_accuracy/proximity_alert_radius. venue: latitude/longitude/title/address and optional place IDs. contact: phone_number/first_name and optional last_name/vcard (only supplied/authorized details). dice: optional emoji 🎲 🎯 🏀 ⚽ 🎳 🎰. edit_caption: own message_id/caption and optional parse_mode/show_caption_above_media. edit_live_location: own message_id/latitude/longitude; stop_live_location and stop_poll: own message_id. copy/forward: actual message_id from this conversation, optional caption for copy. Group administration uses the existing admin tools; this tool does not change bot configuration.
+
+## telegram_media_lookup
+
+Inspect Telegram media without exposing bot-token download URLs. kind=sticker_set accepts a pack short name or https://t.me/addstickers/PACK and returns paginated sticker file_ids, emoji and format metadata (offset pagination). Select a real file_id and send it with telegram_send_media(kind=sticker,media=file:ID). kind=file returns safe metadata for an actual file_id. kind=import_file downloads that Telegram file into scoped durable storage (cloud download limit 20 MB), returning an artifact to inspect with workspace_read; supported images become visual input. Animated/vector/video stickers may need capabilities beyond static image viewing. kind=custom_emoji accepts up to 100 comma-separated custom emoji IDs. Pack metadata is not a visual inspection of each sticker. Keep useful pack names/selected file IDs in scoped Neon context notes when helpful; a bot has no human client's installed-sticker tray.

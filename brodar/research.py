@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from uuid import UUID, NAMESPACE_URL, uuid5
 
 from .hyperagent import AuthenticationRequired, HyperagentError, RemoteRejected
@@ -34,14 +35,16 @@ def parse_status(value, expected_thread, expected_agent):
     uid = thread.get('threadId') or thread.get('thread_id') or thread.get('id')
     if uid and uid != expected_thread:
         raise HyperagentError('Hyperagent returned the wrong research thread')
-    agent = thread.get('agentId') or thread.get('agent_id')
+    agent = thread.get('agentId') or thread.get('agent_id') or thread.get('namedAgentId')
     if agent and agent != expected_agent:
         raise HyperagentError('Hyperagent returned the wrong research agent')
     state = str(thread.get('status') or value.get('status') or '').lower()
+    if value.get('awaitingApproval') or thread.get('awaitingApproval'):
+        return {'status':'blocked','report':'Research is waiting for approval in Hyperagent. Review the pending action there; nothing was automatically approved.','result_id':'awaiting_approval'}
     if state in {'failed', 'error', 'cancelled', 'canceled'}:
         return {'status': 'failed', 'report': 'Hyperagent research run failed. Check the thread in Hyperagent.', 'result_id': state}
     if state in {'blocked', 'waiting_for_approval', 'requires_approval'}:
-        return {'status': 'blocked', 'report': 'Research is waiting for approval in Hyperagent. No action was automatically approved.', 'result_id': state}
+        return {'status': 'blocked', 'report': 'Research is waiting for approval in Hyperagent. No action was automatically approved.', 'result_id': 'awaiting_approval' if state!='blocked' else state}
     running = thread.get('isRunning', thread.get('is_running', thread.get('running', value.get('isRunning', value.get('running')))))
     if running is True or state in {'running', 'queued', 'pending', 'in_progress'}:
         return None
@@ -62,8 +65,10 @@ def parse_status(value, expected_thread, expected_agent):
     content = scrub(content[:100_000])
     if truncated:content+='\n[Report exceeded the 100,000-character transport limit; inspect the Hyperagent thread for the remainder.]'
     result_id = str(last.get('id') or last.get('messageId') or digest(content))
-    declared = content.lstrip().upper()
-    status = 'blocked' if declared.startswith('BLOCKED') else ('partial' if truncated or declared.startswith('PARTIAL') else 'complete')
+    declared=content.lstrip(' \n\r\t#*_`>-').upper()
+    marker=re.match(r'(?:STATUS\s*:\s*)?(COMPLETE|PARTIAL|BLOCKED)\b',declared)
+    declared_status=marker.group(1).lower() if marker else 'complete'
+    status='partial' if truncated and declared_status!='blocked' else declared_status
     return {'status': status, 'report': content, 'result_id': result_id}
 
 
@@ -90,7 +95,7 @@ class ResearchStore:
                     if (row['brief'], row['origin_chat_id'], row['origin_topic_id']) != (brief, scope.chat_id, scope.topic_id):
                         raise ValueError('Research operation ID already has different content')
                     return row
-                c.execute("SELECT count(*) FILTER (WHERE status IN ('queued','submitting','running')),count(*) "
+                c.execute("SELECT count(*) FILTER (WHERE status IN ('queued','submitting','running','waiting')),count(*) "
                           "FROM brodar_v2.research_tasks WHERE audience=%s AND transport='hyperagent_mcp' AND created_at>now()-interval '1 day'", (self.audience,))
                 active, daily = c.fetchone()
                 if active >= 4 or daily >= 30:
@@ -144,20 +149,20 @@ class ResearchStore:
         def op():
             with self.db.transaction(self.audience) as c:
                 c.execute("SELECT 1 FROM brodar_v2.research_tasks WHERE audience=%s AND transport='hyperagent_mcp' AND "
-                          "((status IN ('queued','running') AND (next_poll<=now() OR deadline<=now())) OR "
+                          "((status IN ('queued','running','waiting') AND (next_poll<=now() OR deadline<=now())) OR "
                           "(status='submitting' AND (lease_until<now() OR consumer_owner IS DISTINCT FROM %s::uuid))) LIMIT 1",
                           (self.audience,self.lease().owner))
                 if c.fetchone() is None:return []
                 self.fence(c)
                 # A process may have died after the remote server accepted a job.
                 # Never repeat that submission automatically without a thread ID.
-                c.execute("UPDATE brodar_v2.research_tasks SET status='uncertain',error_code='submission_outcome_unknown',lease_until=NULL "
+                c.execute("UPDATE brodar_v2.research_tasks SET status='uncertain',error_code='submission_outcome_unknown',lease_until=NULL,result=NULL,result_version=result_version+1 "
                           "WHERE audience=%s AND transport='hyperagent_mcp' AND status='submitting' "
                           "AND (lease_until<now() OR consumer_owner IS DISTINCT FROM %s::uuid)", (self.audience, self.lease().owner))
-                c.execute("UPDATE brodar_v2.research_tasks SET status='failed',error_code='research_deadline_expired',lease_until=NULL "
-                          "WHERE audience=%s AND transport='hyperagent_mcp' AND status IN ('queued','running') AND deadline<=now()", (self.audience,))
+                c.execute("UPDATE brodar_v2.research_tasks SET status='failed',error_code='research_deadline_expired',lease_until=NULL,result=NULL,result_version=result_version+1 "
+                          "WHERE audience=%s AND transport='hyperagent_mcp' AND status IN ('queued','running','waiting') AND deadline<=now()", (self.audience,))
                 c.execute("WITH due AS MATERIALIZED (SELECT id FROM brodar_v2.research_tasks WHERE audience=%s AND transport='hyperagent_mcp' "
-                          "AND status IN ('queued','running') AND next_poll<=now() AND deadline>now() "
+                          "AND status IN ('queued','running','waiting') AND next_poll<=now() AND deadline>now() "
                           "AND (lease_until IS NULL OR lease_until<now() OR consumer_owner IS DISTINCT FROM %s::uuid) "
                           "ORDER BY next_poll LIMIT %s FOR UPDATE SKIP LOCKED) "
                           "UPDATE brodar_v2.research_tasks t SET consumer_owner=%s,lease_until=now()+interval '2 minutes' "
@@ -176,6 +181,7 @@ class ResearchStore:
                 for key, value in changes.items():
                     fields.append(key + ('=%s::jsonb' if key == 'result' else '=%s'))
                     args.append(json.dumps(value) if key == 'result' else value)
+                if 'result' in changes:fields.append('result_version=result_version+1')
                 fields += ["next_poll=now()+(%s*interval '1 second')", 'lease_until=NULL']
                 args += [delay, self.audience, str(row['id']), self.lease().owner, row['generation']]
                 c.execute('UPDATE brodar_v2.research_tasks SET ' + ','.join(fields) +
@@ -197,7 +203,7 @@ class ResearchStore:
         def op():
             with self.db.transaction(self.audience, readonly=True) as c:
                 c.execute("SELECT * FROM brodar_v2.research_tasks WHERE audience=%s AND transport='hyperagent_mcp' "
-                          "AND status IN ('complete','partial','blocked','failed','uncertain') AND notified_generation<generation ORDER BY created_at LIMIT 10", (self.audience,))
+                          "AND status IN ('complete','partial','blocked','failed','uncertain','waiting') AND notified_result_version<result_version ORDER BY created_at LIMIT 10", (self.audience,))
                 return records(c)
         return await self.db.run(op)
 
@@ -206,7 +212,7 @@ class ResearchStore:
             with self.db.transaction(self.audience,readonly=True) as c:
                 c.execute("SELECT extract(epoch FROM coalesce(min(next_poll),now()+interval '60 seconds')-now()) "
                           "FROM brodar_v2.research_tasks WHERE audience=%s AND transport='hyperagent_mcp' "
-                          "AND status IN ('queued','running','submitting')",(self.audience,))
+                          "AND status IN ('queued','running','submitting','waiting')",(self.audience,))
                 return max(1,min(60,float(c.fetchone()[0])))
         return await self.db.run(op)
 
@@ -214,8 +220,8 @@ class ResearchStore:
         def op():
             with self.db.transaction(self.audience) as c:
                 self.fence(c)
-                c.execute('UPDATE brodar_v2.research_tasks SET notified_generation=%s WHERE audience=%s AND id=%s AND generation=%s',
-                          (row['generation'], self.audience, str(row['id']), row['generation']))
+                c.execute('UPDATE brodar_v2.research_tasks SET notified_generation=%s,notified_result_version=%s WHERE audience=%s AND id=%s AND generation=%s AND result_version=%s',
+                          (row['generation'],row['result_version'],self.audience,str(row['id']),row['generation'],row['result_version']))
         await self.db.run(op)
 
 
@@ -255,7 +261,7 @@ class ResearchService:
             row = await self.store.enqueue(task_id=task_id, scope=scope, requester=cap.requester_id,
                 request_id=cap.turn_id, brief=brief, agent_id=self.transport.agent_id, message=message, operation=operation)
         finally: WRITE_FENCE.reset(token)
-        source.pending_research = row['status'] in {'queued','submitting','running'}
+        source.pending_research = row['status'] in {'queued','submitting','running','waiting'}
         if source.before_final_delivery: await source.before_final_delivery(cap)
         self.wake.set()
         return {'task_id': task_id, 'status': row['status'], 'transport': 'hyperagent_mcp',
@@ -278,7 +284,7 @@ class ResearchService:
         try:
             row = await self.store.follow_up(task_id, render('research-delegation.md', task_id=task_id, brief=scrub(brief)), operation)
         finally: WRITE_FENCE.reset(token)
-        source.pending_research = row['status'] in {'queued','submitting','running'}
+        source.pending_research = row['status'] in {'queued','submitting','running','waiting'}
         if source.before_final_delivery: await source.before_final_delivery(cap)
         self.wake.set()
         return {'task_id': task_id, 'status': row['status'], 'background': True}
@@ -305,9 +311,9 @@ class ResearchService:
             else:
                 result = parse_status(await self.transport.status(row['remote_thread_id']), row['remote_thread_id'], row['remote_agent_id'])
                 if result is None or result['result_id'] == row.get('last_result_id'):
-                    await self.store.update(row, status='running',attempts=0)
+                    await self.store.update(row, status='waiting' if result and result['result_id']=='awaiting_approval' else 'running',attempts=0)
                 else:
-                    await self.store.update(row, status=result['status'], result=result, last_result_id=result['result_id'], error_code=None,attempts=0)
+                    await self.store.update(row, status='waiting' if result['result_id']=='awaiting_approval' else result['status'], result=result, last_result_id=result['result_id'], error_code=None,attempts=0)
         except asyncio.CancelledError:
             # Persisted 'submitting' will become uncertain on restart; do not retry.
             raise

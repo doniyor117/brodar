@@ -6,14 +6,11 @@ model. Runtime authentication never launches an interactive browser flow.
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import os
 import secrets
 import time
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit, parse_qs
 
 import httpx
 from mcp import ClientSession
@@ -75,6 +72,21 @@ def token_record(value):
     return dict(value, expires_at=None if expiry is None else time.time()+max(0,float(expiry)))
 
 
+def credentials(path):
+    """Read either a dedicated grant or the owner's selected Codex grant."""
+    record=read_auth(path)
+    source=record.get('codex_credentials_file')
+    if source:
+        item=read_auth(source).get(record.get('codex_server_key'),{})
+        if item.get('server_url')!=ENDPOINT or item.get('issuer',BASE)!=BASE:
+            raise AuthenticationRequired('Codex Hyperagent connection is missing or belongs to another server')
+        expiry=item.get('expires_at')
+        tokens={'access_token':item.get('access_token'),'refresh_token':item.get('refresh_token'),
+                'scope':' '.join(item.get('scopes',[])), 'expires_at':expiry/1000 if expiry else None}
+        return dict(record,client_id=item.get('client_id')),tokens
+    return record,record.get('tokens') or {}
+
+
 class ResearchAuth(httpx.Auth):
     def __init__(self, path):
         self.path = Path(path)
@@ -82,8 +94,7 @@ class ResearchAuth(httpx.Auth):
 
     async def _token(self, *, refresh=False):
         async with self.lock:
-            record = read_auth(self.path)
-            tokens = record.get('tokens') or {}
+            record,tokens=credentials(self.path)
             if not tokens.get('access_token'):
                 raise AuthenticationRequired('Connect Hyperagent with brodar hyperagent-login')
             expiry=tokens.get('expires_at')
@@ -97,11 +108,28 @@ class ResearchAuth(httpx.Auth):
                         'resource': ENDPOINT,
                     })
                 if response.status_code != 200:
+                    if record.get('codex_credentials_file'):
+                        _,latest=credentials(self.path)
+                        if latest.get('refresh_token')!=tokens['refresh_token'] and latest.get('access_token'):
+                            return latest['access_token']
                     raise AuthenticationRequired('Hyperagent OAuth refresh failed; reconnect')
                 updated = token_record(response.json())
                 updated.setdefault('refresh_token', tokens['refresh_token'])
-                record['tokens'] = updated
-                write_auth(self.path, record)
+                if record.get('codex_credentials_file'):
+                    # One canonical credential record, not two competing refresh
+                    # token copies. Preserve other Codex server credentials.
+                    source=record['codex_credentials_file'];key=record['codex_server_key']
+                    latest=read_auth(source);entry=latest.get(key,{})
+                    if entry.get('refresh_token')!=tokens['refresh_token']:
+                        _,current=credentials(self.path)
+                        return current['access_token']
+                    entry.update(access_token=updated['access_token'],refresh_token=updated.get('refresh_token'),
+                        expires_at=int(updated['expires_at']*1000) if updated['expires_at'] is not None else None,
+                        scopes=updated.get('scope',tokens['scope']).split())
+                    latest[key]=entry;write_auth(source,latest)
+                else:
+                    record['tokens'] = updated
+                    write_auth(self.path, record)
                 tokens = updated
             return tokens['access_token']
 
@@ -141,7 +169,9 @@ class HyperagentTransport:
     def ready(self):
         record=read_auth(self.auth_file)
         self.agent_id=self.agent_id or record.get('agent_id','')
-        return bool(self.agent_id and (record.get('tokens') or {}).get('access_token'))
+        try:_,tokens=credentials(self.auth_file)
+        except AuthenticationRequired:return False
+        return bool(self.agent_id and tokens.get('access_token'))
 
     async def call(self, name, arguments=None):
         # This is deliberately a small host allowlist, not a public tool proxy.
@@ -181,6 +211,7 @@ class HyperagentTransport:
         # Preflight all schemas before a possibly billable create_thread call.
         self.arguments('create_thread', agent=self.agent_id, message='preflight')
         self.arguments('get_thread', thread='preflight')
+        self.arguments('send_message',thread='preflight',message='preflight')
 
     async def submit(self, message):
         return await self.call('create_thread', self.arguments('create_thread', agent=self.agent_id, message=message))
@@ -193,65 +224,19 @@ class HyperagentTransport:
 
 
 async def login(auth_file):
-    """Operator-only loopback OAuth; print the authorization URL, never tokens."""
-    callback = asyncio.get_running_loop().create_future()
-
-    async def receive(reader, writer):
-        try:
-            line = await asyncio.wait_for(reader.readline(), 5)
-            parts = line.decode('ascii', errors='replace').split()
-            url = urlsplit(parts[1]) if len(parts) >= 2 else None
-            query = parse_qs(url.query) if url else {}
-            if url and url.path == '/callback' and secrets.compare_digest(query.get('state',[''])[0],state) and ('code' in query or 'error' in query):
-                if not callback.done(): callback.set_result(query)
-                body = b'Authorization received. You can return to Brodar.'
-                status = b'200 OK'
-            else:
-                body = b'Not found'
-                status = b'404 Not Found'
-            writer.write(b'HTTP/1.1 ' + status + b'\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n' + body)
-            await writer.drain()
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    server = await asyncio.start_server(receive, '127.0.0.1', 0)
-    port = server.sockets[0].getsockname()[1]
-    redirect_uri = f'http://127.0.0.1:{port}/callback'
-    verifier = secrets.token_urlsafe(48)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
-    state = secrets.token_urlsafe(32)
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-            response = await client.post(BASE + '/api/oauth/register', json={
-                'client_name': 'Brodar Research', 'redirect_uris': [redirect_uri],
-                'token_endpoint_auth_method': 'none', 'grant_types': ['authorization_code', 'refresh_token'],
-                'response_types': ['code'], 'scope': SCOPES,
-            })
-            if response.status_code not in {200, 201}:
-                raise AuthenticationRequired('Hyperagent OAuth client registration failed')
-            client_id = response.json()['client_id']
-            query = urlencode({'response_type': 'code', 'client_id': client_id,
-                'redirect_uri': redirect_uri, 'scope': SCOPES, 'state': state,
-                'code_challenge': challenge, 'code_challenge_method': 'S256', 'resource': ENDPOINT})
-            print('OPEN_BROWSER ' + BASE + '/api/oauth/authorize?' + query, flush=True)
-            result = await asyncio.wait_for(callback, 900)
-            if not secrets.compare_digest(result.get('state', [''])[0], state) or 'code' not in result:
-                raise AuthenticationRequired('Hyperagent authorization denied or state mismatch')
-            if result.get('iss', [BASE])[0] != BASE:
-                raise AuthenticationRequired('Unexpected OAuth authorization issuer')
-            response = await client.post(BASE + '/api/oauth/token', data={
-                'grant_type': 'authorization_code', 'client_id': client_id,
-                'code': result['code'][0], 'redirect_uri': redirect_uri,
-                'code_verifier': verifier, 'resource': ENDPOINT,
-            })
-            if response.status_code != 200:
-                raise AuthenticationRequired('Hyperagent OAuth code exchange failed')
-            write_auth(auth_file, {'client_id': client_id, 'tokens': token_record(response.json())})
-        transport = HyperagentTransport(auth_file)
-        agents = await transport.call('list_agents')
-        print('Hyperagent OAuth connected.', flush=True)
-        return agents
-    finally:
-        server.close()
-        await server.wait_closed()
+    """Operator CLI login, including SSH's hidden callback-URL prompt."""
+    profile=Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex')))
+    argv=['codex','-c','mcp_oauth_credentials_store="file"',
+          '-c','mcp_servers.hyperagent.url="'+ENDPOINT+'"',
+          'mcp','login','hyperagent','--no-browser','--scopes',SCOPES.replace(' ',',')]
+    process=await asyncio.create_subprocess_exec(*argv)
+    if await process.wait():raise AuthenticationRequired('Codex Hyperagent OAuth login did not complete')
+    source=profile/'.credentials.json'
+    rows=read_auth(source)
+    matches=[key for key,row in rows.items() if row.get('server_name')=='hyperagent' and row.get('server_url')==ENDPOINT]
+    if len(matches)!=1:raise AuthenticationRequired('Expected one authenticated Hyperagent Codex connection')
+    record=read_auth(auth_file)
+    # Reference the canonical CLI record, rather than copying a rotating grant.
+    write_auth(auth_file,{'codex_credentials_file':str(source),'codex_server_key':matches[0],
+                         'agent_id':record.get('agent_id','')})
+    return await HyperagentTransport(auth_file).call('list_agents')

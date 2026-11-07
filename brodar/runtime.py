@@ -39,8 +39,12 @@ log=logging.getLogger('brodar')
 
 
 def undelivered_artifacts(artifacts,receipts):
-    delivered={str(row['request'].get('artifact_id')) for row in receipts
-               if row['status']=='sent' and row['method'] in {'send_document','routed_document'}}
+    delivered=set()
+    for row in receipts:
+        if row['status']!='sent' or row['method'] not in {'send_document','routed_document','routed_media','send_photo','send_video','send_animation','send_audio','send_voice','send_video_note','send_sticker','send_media_group'}:continue
+        request=row.get('request') or {}
+        if request.get('artifact_id'):delivered.add(str(request['artifact_id']))
+        delivered.update(str(item['artifact_id']) for item in request.get('items',[]) if item.get('artifact_id'))
     return [str(row['artifact_id']) for row in artifacts if str(row['artifact_id']) not in delivered]
 
 
@@ -53,13 +57,15 @@ def origin_report_needed(receipts,scope):
     remote=[]
     for index,row in enumerate(receipts):
         request=row.get('request') or {}
-        routed=row.get('method') in {'routed_message','routed_document'}
+        routed=row.get('method') in {'routed_message','routed_document','routed_media'}
         elsewhere=(routed and (request.get('chat_id'),request.get('topic_id',0))!=(scope.chat_id,scope.topic_id)) or row.get('topic_id',scope.topic_id)!=scope.topic_id
         if elsewhere and row['status'] in {'sent','failed','sending','uncertain'}:remote.append(index)
     if not remote:return False
     for row in receipts[max(remote)+1:]:
         if (row['status']=='sent' and row.get('topic_id',scope.topic_id)==scope.topic_id
-                and row.get('method') in {'send_message','send_document','edit_message'}
+                and (row.get('method') in {'send_message','send_document','edit_message','edit_message_caption'} or
+                     (row.get('method') in {'send_photo','send_audio','send_video','send_voice','send_animation','send_media_group'} and
+                      bool((row.get('request') or {}).get('caption') or any(item.get('caption') for item in (row.get('request') or {}).get('items',[])))))
                 and (row.get('response') or {}).get('final',True)):
             return False
     return True
@@ -67,7 +73,7 @@ def origin_report_needed(receipts,scope):
 
 def research_feedback_needed(broker,receipts):
     if not broker.research_context or broker.pending_research:return False
-    return not any(row['status']=='sent' and row.get('method') in {'send_message','send_document','edit_message'}
+    return not any(row['status']=='sent' and (row.get('method','').startswith('send_') or row.get('method') in {'edit_message','edit_message_caption','copy_message','forward_message'})
                    and row.get('topic_id',broker.store.scope.topic_id)==broker.store.scope.topic_id
                    and (row.get('response') or {}).get('final',True) for row in receipts)
 
@@ -308,7 +314,7 @@ class Conversation:
         try:
             if any(r['status'] in {'sending','uncertain'} for r in receipts):
                 text="i couldn't confirm the last delivery. i won't resend it automatically"
-            elif origin_report_needed(receipts,self.store.scope) and any(r['status']=='sent' and r.get('method') in {'routed_message','routed_document'} for r in receipts):
+            elif origin_report_needed(receipts,self.store.scope) and any(r['status']=='sent' and r.get('method') in {'routed_message','routed_document','routed_media'} for r in receipts):
                 text="the other-group delivery went through, but i couldn't finish the follow-up here"
             else:text="that failed on my side. send it again and i'll retry"
             await self.broker.send_message(text,call_id='terminal-failure')
@@ -320,6 +326,8 @@ class Conversation:
         from .redaction import scrub
         for row in batch:
             payload=row['payload'];message=payload.get('message') or payload.get('edited_message') or {}
+            if not addressed(message,self.store.scope.bot_id,getattr(self.bot,'username',None)):
+                continue  # archive file references; fetch ambient media only on demand
             document=next((message.get(k) for k in ('document','video','animation','audio','voice','video_note','sticker') if message.get(k)),None);photos=message.get('photo') or []
             media=document or (photos[-1] if photos else None)
             if not media or (media.get('file_size') or 0)>20_000_000:continue
@@ -531,7 +539,7 @@ async def run(cfg):
         artifact=None
         if len(report)>12000 and objects:
             artifact=await Artifacts(LearningStore(research_events_db,scope,lease_owner=lease.owner),objects).put(
-                turn_id=str(row['id']),operation_id=f'research-result:{row["generation"]}',filename=f'research-{row["id"]}.md',
+                turn_id=str(row['id']),operation_id=f'research-result:{row["generation"]}:{row["result_version"]}',filename=f'research-{row["id"]}.md',
                 mime='text/markdown',body=report.encode(),request_hash=hashlib.sha256(report.encode()).hexdigest(),metadata={'source':'hyperagent','task_id':str(row['id'])})
         content=render('research-result.md',task_id=str(row['id']),status=row['status'],brief=row['brief'],
             report=report if not artifact else report[:12000],artifact=json.dumps(artifact,default=str) if artifact else 'none',

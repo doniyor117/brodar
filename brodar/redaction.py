@@ -5,6 +5,9 @@ from hamroh.utils.secrets_scrubber import scrub as upstream_scrub
 
 _EXTRA=(re.compile(r'\bAIza[A-Za-z0-9_-]{35}\b'),
         re.compile(r'\bhat_[A-Za-z0-9_-]{16,}\b'),
+        # Telegram URLs prefix tokens with "bot", so a leading word boundary
+        # would miss the credential inside /botTOKEN and /file/botTOKEN.
+        re.compile(r'(?<!\d)\d{6,12}:(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{30,40}(?![A-Za-z0-9_-])'),
         re.compile(r'\bgithub_pat_[A-Za-z0-9_]{40,}\b'))
 
 

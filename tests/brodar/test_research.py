@@ -23,6 +23,7 @@ class Tasks:
             remote_agent_id=values['agent_id'],outbound_message=values['message'],generation=0,
             attempts=0,last_result_id=None,origin_chat_id=values['scope'].chat_id,
             origin_topic_id=values['scope'].topic_id,requester_id=values['requester'],notified_generation=-1))
+        row.setdefault('result_version',0);row.setdefault('notified_result_version',-1)
         if not self.queued:self.queued.append(copy.copy(row))
         return row
     async def get(self,uid):return self.rows[uid]
@@ -33,9 +34,12 @@ class Tasks:
     async def update(self,row,**values):
         self.changes.append(values)
         self.rows[row['id']].update({k:v for k,v in values.items() if k!='delay'})
+        if 'result' in values:self.rows[row['id']]['result_version']+=1
     async def notifications(self):
-        return [r for r in self.rows.values() if r['status'] in {'complete','partial','blocked','failed','uncertain'} and r['notified_generation']<r['generation']]
-    async def notified(self,row):self.rows[row['id']]['notified_generation']=row['generation']
+        return [r for r in self.rows.values() if r['status'] in {'complete','partial','blocked','failed','uncertain','waiting'} and r['notified_result_version']<r['result_version']]
+    async def notified(self,row):
+        self.rows[row['id']]['notified_generation']=row['generation']
+        self.rows[row['id']]['notified_result_version']=row['result_version']
     async def next_delay(self):return 60
 
 
@@ -95,6 +99,46 @@ async def test_completed_report_notified_once_and_survives_service_recreation():
 
 
 @pytest.mark.asyncio
+async def test_approval_pause_is_reported_once_then_final_result_resumes_without_resubmission():
+    service,store,remote,source,results=setup()
+    queued=await service.delegate(source,'research','one');await service.tick()
+    row=store.rows[queued['task_id']]
+    original=remote.status
+    async def approval(uid):return {'thread':{'id':uid,'namedAgentId':remote.agent_id},'isRunning':False,'awaitingApproval':True,'messages':[]}
+    remote.status=approval
+    for _ in range(2):
+        store.queued=[copy.copy(row)];await service.tick()
+    assert row['status']=='waiting' and len(results)==1
+    first_version=results[0]['result_version']
+    remote.status=original
+    store.queued=[copy.copy(row)];await service.tick()
+    assert row['status']=='complete' and len(results)==2
+    assert results[-1]['result_version']>first_version
+    assert len(remote.calls)==1
+
+
+@pytest.mark.asyncio
+async def test_cli_grant_reference_refresh_preserves_other_codex_credentials(tmp_path,monkeypatch):
+    import httpx,time
+    from brodar.hyperagent import ResearchAuth,ENDPOINT
+    canonical=tmp_path/'credentials.json';config=tmp_path/'research.json'
+    key='hyperagent|example'
+    write_auth(canonical,{key:{'server_name':'hyperagent','server_url':ENDPOINT,'issuer':'https://hyperagent.com',
+        'client_id':'client','access_token':'old','refresh_token':'refresh','expires_at':int((time.time()-60)*1000),
+        'scopes':['threads:read','threads:write']},'another':{'access_token':'untouched'}})
+    write_auth(config,{'codex_credentials_file':str(canonical),'codex_server_key':key,'agent_id':'researcher'})
+    factory=httpx.AsyncClient
+    def handle(request):
+        assert str(request.url)=='https://hyperagent.com/api/oauth/token'
+        return httpx.Response(200,json={'access_token':'new','refresh_token':'next-refresh','expires_in':900,'scope':'threads:read threads:write'})
+    monkeypatch.setattr('brodar.hyperagent.httpx.AsyncClient',lambda **kw:factory(transport=httpx.MockTransport(handle),**kw))
+    assert await ResearchAuth(config)._token()=='new'
+    value=read_auth(canonical)
+    assert value[key]['access_token']=='new' and value['another']['access_token']=='untouched'
+    assert 'tokens' not in read_auth(config)
+
+
+@pytest.mark.asyncio
 async def test_submission_timeout_is_uncertain_and_never_resubmitted():
     service,store,remote,source,results=setup()
     remote.error=TimeoutError()
@@ -148,6 +192,16 @@ def test_result_validation_checks_identity_state_and_redacts_credentials():
     result=parse_status({'threadId':'t','isRunning':False,'messages':[{'role':'assistant','content':'PARTIAL\nhat_'+'A'*30}]},'t','a')
     assert result['status']=='partial' and 'hat_' not in result['report']
     assert parse_status({'isRunning':False,'messages':[]},'t','a')['status']=='failed'
+
+
+def test_real_hyperagent_envelope_handles_named_agent_approval_and_markdown_status():
+    value={'thread':{'id':'t','namedAgentId':'a'},'isRunning':False,'awaitingApproval':False,
+        'messages':[{'role':'assistant','id':'m','content':'**PARTIAL — TASK_ID: example**\nOnly part was accessible.'}]}
+    assert parse_status(value,'t','a')['status']=='partial'
+    value['awaitingApproval']=True
+    assert parse_status(value,'t','a')['status']=='blocked'
+    value['thread']['namedAgentId']='wrong'
+    with pytest.raises(HyperagentError):parse_status(value,'t','a')
 
 
 def test_mcp_result_and_schema_validation_do_not_guess_or_echo_errors(tmp_path):

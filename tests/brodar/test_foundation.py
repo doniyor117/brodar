@@ -54,6 +54,7 @@ def test_credentials_are_scrubbed_from_text_and_nested_updates():
     assert redacted['id']==42
     assert update['message']['text'].endswith(key)  # caller's object is not mutated
     assert scrub('ordinary English, Uzbek and Русский stays intact')=='ordinary English, Uzbek and Русский stays intact'
+    assert token not in scrub('https://api.telegram.org/file/bot'+token+'/photo.webp')
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ class GroupRouter:
             except Exception:result.append({'chat_id':chat_id,'metadata_unavailable':True})
         return result
     async def send(self,source,chat_id,text,operation,topic=0,reply_to=None,peer=None):
+        text=scrub(text)
         cap=source.require(visible=True)
         target=self.target(chat_id,topic)
         if source.store.scope.chat_id>0 and cap.requester_id not in self.cfg.owner_ids:raise PermissionError('Only owner DM may route to groups')
@@ -99,6 +100,7 @@ class GroupRouter:
         if cap.peer_bot_id:await self.loop_guard.close(cap.peer_bot_id)
         return {'task_id':task_id,'status':'done','return_chat_id':chat_id,'parts':len(chunks)}
     async def send_document(self,source,chat_id,artifact_id,operation,caption='',topic=0):
+        caption=scrub(caption)
         from .artifacts import Artifacts
         cap=source.require(visible=True);target=self.target(chat_id,topic)
         if source.artifacts is None or self.objects is None:raise RuntimeError('Durable object storage unavailable')
@@ -118,4 +120,42 @@ class GroupRouter:
             sent=await broker.send_document(item['artifact_id'],caption,'target-file:'+operation)
             return SimpleNamespace(message_id=sent['message_id']) if sent.get('message_id') else True
         result=await source.deliver(cap,'routed_document',{'chat_id':chat_id,'topic_id':topic,'artifact_id':artifact_id,'caption':caption},'route-file:'+operation,transfer)
+        return dict(result,chat_id=chat_id,topic_id=topic)
+
+    async def send_media(self,source,chat_id,kind,media,operation,caption='',options=None,topic=0,reply_to=None):
+        from .artifacts import Artifacts
+        from .telegram_media import send_media,reserve_mentions,options_for,clean_text
+        from .write_fence import WRITE_FENCE
+        cap=source.require(visible=True);target=self.target(chat_id,topic)
+        if source.store.scope.chat_id>0 and cap.requester_id not in self.cfg.owner_ids:raise PermissionError('Only owner DM may route to groups')
+        options_for(kind,options);caption=clean_text(caption)
+        await reserve_mentions(source,caption,operation)
+        artifact_id=None
+        if media.startswith('artifact:'):
+            artifact_id=str(UUID(media[9:]))
+            if source.artifacts is None or self.objects is None:raise RuntimeError('Durable object storage unavailable')
+            record=await source.artifacts.get_record(artifact_id)
+            if record is None:raise ValueError('Source artifact missing')
+            if (record.get('metadata') or {}).get('sensitive'):raise PermissionError('A read approval does not authorize cross-group disclosure of sensitive files')
+        def guard():
+            if source.capability is not cap:raise PermissionError('Source media turn ended')
+        async def routed():
+            token=WRITE_FENCE.set(guard)
+            try:
+                reference=media
+                artifacts=Artifacts(target,self.objects) if self.objects else None
+                if artifact_id:
+                    original,body=await source.artifacts.read(artifact_id)
+                    guard()
+                    item=await artifacts.put(turn_id=cap.turn_id,operation_id='media-transfer:'+operation,filename=original['filename'],
+                        mime=original['mime_type'],body=body,request_hash=original['content_hash'],metadata={'source_artifact_id':artifact_id})
+                    reference='artifact:'+item['artifact_id']
+                async def delivery_guard():guard();await self.lease().require()
+                broker=ToolBroker(target,self.bot,artifacts=artifacts,delivery_guard=delivery_guard)
+                broker.begin(TurnCapability(cap.turn_id,requester_id=cap.requester_id))
+                sent=await send_media(broker,kind,reference,caption,'target-media:'+operation,options,reply_to)
+                return SimpleNamespace(message_id=sent['message_id']) if sent.get('message_id') else True
+            finally:WRITE_FENCE.reset(token)
+        result=await source.deliver(cap,'routed_media',{'chat_id':chat_id,'topic_id':topic,'kind':kind,'media':media,
+            'artifact_id':artifact_id,'caption':caption,'options':options or {},'reply_to':reply_to},'route-media:'+operation,routed)
         return dict(result,chat_id=chat_id,topic_id=topic)

@@ -15,6 +15,10 @@ from .store import RevisionConflict
 from .write_fence import guarded_write,WRITE_FENCE
 
 
+class DeliveryRejected(RuntimeError):
+    """Known rejection can propagate through routed delivery without ambiguity."""
+
+
 @dataclass(frozen=True)
 class TurnCapability:
     turn_id: str
@@ -213,6 +217,8 @@ class ToolBroker:
 
     async def deliver(self,cap,method,request,call_id,send,*,preflight=None,final=False):
         if not call_id or len(call_id)>200:raise ValueError('Use an operation ID of 1 to 200 characters')
+        from .redaction import scrub_object
+        if scrub_object(request)!=request:raise PermissionError('Credential-like content cannot be delivered or stored in a receipt')
         async with self._delivery_lock:
             if self.capability is not cap:raise PermissionError('Turn was cancelled')
             if self.loop_guard and cap.peer_bot_id:
@@ -240,9 +246,9 @@ class ToolBroker:
             try:
                 if final and self.before_final_delivery:await self.before_final_delivery(cap)
                 sent=await send()
-            except (BadRequest,Forbidden,RetryAfter) as exc:
+            except (BadRequest,Forbidden,RetryAfter,DeliveryRejected) as exc:
                 await self.store.delivery_finish(receipt['id'],'failed',{'error':type(exc).__name__})
-                raise RuntimeError(f'Telegram rejected delivery ({type(exc).__name__})') from None
+                raise DeliveryRejected(f'Telegram rejected delivery ({type(exc).__name__})') from None
             except NetworkError:
                 await self.store.delivery_finish(receipt['id'],'uncertain',{'error':'network_outcome_unknown'})
                 raise RuntimeError('Telegram delivery outcome is uncertain; do not retry automatically') from None
@@ -255,11 +261,16 @@ class ToolBroker:
                 await self.store.delivery_finish(receipt['id'],'failed',{'error':'telegram_returned_false'})
                 raise RuntimeError('Telegram did not confirm the action')
             result={'delivered':True}
-            if method in {'send_message','send_document'} and not final:result['final']=False
-            if getattr(sent,'message_id',None):result['message_id']=sent.message_id
+            if (method.startswith('send_') or method in {'copy_message','forward_message'}) and not final:result['final']=False
+            if isinstance(sent,(list,tuple)) and sent and all(getattr(item,'message_id',None) for item in sent):
+                result['message_ids']=[item.message_id for item in sent]
+            elif getattr(sent,'message_id',None):result['message_id']=sent.message_id
             elif sent is not True:
                 await self.store.delivery_finish(receipt['id'],'uncertain',{'error':'unexpected_telegram_result'})
                 raise RuntimeError('Unexpected Telegram response; delivery outcome is uncertain')
+            photos=getattr(sent,'photo',None)
+            media=photos[-1] if photos else next((getattr(sent,key,None) for key in ['document','video','animation','audio','voice','video_note','sticker'] if getattr(sent,key,None)),None)
+            if media is not None and getattr(media,'file_id',None):result['media_file_id']=media.file_id
             await self.store.delivery_finish(receipt['id'],'sent',result)
             if not self._first_delivery:
                 self._first_delivery=True

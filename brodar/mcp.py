@@ -83,6 +83,10 @@ class AuditedMcp(FastMCP):
                 return scrub(output) if isinstance(output,str) else output
             except BaseException as exc:
                 error=type(exc).__name__+': '+str(exc)
+                if isinstance(exc,Exception):
+                    from .redaction import scrub
+                    safe=scrub(str(exc))
+                    if safe!=str(exc):raise RuntimeError(safe) from None
                 raise
             finally:
                 if fence_token is not None:WRITE_FENCE.reset(fence_token)
@@ -214,6 +218,33 @@ def build_tools(broker):
     async def group_routes()->str:
         broker.require()
         return result(await broker.router.rooms())
+
+    @mcp.tool()
+    async def telegram_send_media(kind:str,media:str,operation_id:str,caption:str='',options:dict|None=None,
+                                  chat_id:int|None=None,topic_id:int=0,reply_to_message_id:int|None=None,final:bool=True)->str:
+        from .telegram_media import send_media
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        if chat_id is not None and (chat_id,topic_id)!=(source.store.scope.chat_id,source.store.scope.topic_id):
+            return result(await source.router.send_media(source,chat_id,kind,media,operation_id,caption,options,topic_id,reply_to_message_id))
+        return result(await send_media(source,kind,media,caption,operation_id,options,reply_to_message_id,final))
+
+    @mcp.tool()
+    async def telegram_send_album(items:list[dict],operation_id:str,reply_to_message_id:int|None=None,final:bool=True)->str:
+        from .telegram_media import send_album
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await send_album(source,items,operation_id,reply_to_message_id,final))
+
+    @mcp.tool()
+    async def telegram_chat_action(action:str,parameters:dict,operation_id:str)->str:
+        from .telegram_media import chat_action
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await chat_action(source,action,parameters,operation_id))
+
+    @mcp.tool()
+    async def telegram_media_lookup(kind:str,identifier:str,offset:int=0)->str:
+        from .telegram_media import lookup
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await lookup(source,kind,identifier,offset))
 
     @mcp.tool()
     async def group_send(chat_id:int,text:str,operation_id:str,topic_id:int=0,reply_to_message_id:int|None=None)->str:
