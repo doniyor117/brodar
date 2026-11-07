@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+import time
 import ssl
 import threading
 from contextlib import contextmanager
@@ -48,9 +50,11 @@ class Postgres:
             conn = self._connect()
             cur = conn.cursor()
             try:
-                cur.execute(('BEGIN READ ONLY' if readonly else 'BEGIN')+"; SET LOCAL statement_timeout = '30s'")
+                setup=('BEGIN READ ONLY' if readonly else 'BEGIN')+"; SET LOCAL statement_timeout = '30s'"
                 if audience is not None:
-                    cur.execute("SELECT set_config('brodar.audience', %s, true)", (audience,))
+                    # Scope is host constructed; quote as a literal, never interpolate unescaped text.
+                    setup+="; SET LOCAL brodar.audience = '"+audience.replace("'","''")+"'"
+                cur.execute(setup)
                 yield cur
                 if guard:guard()
                 conn.commit()
@@ -68,7 +72,11 @@ class Postgres:
                 cur.close()
 
     async def run(self, operation, *args):
-        return await asyncio.to_thread(operation, *args)
+        started=time.monotonic()
+        try:return await asyncio.to_thread(operation, *args)
+        finally:
+            elapsed=time.monotonic()-started
+            if elapsed>.5:logging.getLogger('brodar.sql').warning('Database operation_ms=%d operation=%s',int(elapsed*1000),getattr(operation,'__qualname__','operation'))
 
     async def close(self):
         def close():

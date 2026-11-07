@@ -28,6 +28,7 @@ class ToolBroker:
     def __init__(self,store,bot,*,embeddings=None,artifacts=None,delivery_guard=None,owner_ids=()):
         self.store,self.bot,self.embeddings=store,bot,embeddings
         self.artifacts=artifacts
+        self.approvals=None
         self.delivery_guard=delivery_guard
         self.owner_ids=owner_ids
         self.capability=None
@@ -161,6 +162,8 @@ class ToolBroker:
 
     async def edit_message(self,message_id,text,operation_id):
         cap=self.require(visible=True)
+        from .redaction import scrub
+        text=scrub(text)
         if not text.strip() or len(text)>4096:raise ValueError('Use 1..4096 characters')
         await self.message_target(message_id,own=True)
         async def send():return await self.bot.edit_message_text(chat_id=self.store.scope.chat_id,message_id=message_id,text=text)
@@ -265,6 +268,8 @@ class ToolBroker:
     async def create_file(self,filename,text,operation_id):
         cap=self.require(visible=True)
         if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
+        from .redaction import scrub
+        text=scrub(text)
         if len(text)>1_000_000:raise ValueError('Text files allow up to 1000000 characters')
         from pathlib import PurePosixPath
         if PurePosixPath(filename).suffix.lower() in {'.pptx','.docx','.xlsx','.pdf','.zip','.png','.jpg','.jpeg','.webp','.mp4'}:
@@ -273,14 +278,15 @@ class ToolBroker:
         return await self.artifacts.put(turn_id=cap.turn_id,operation_id=operation_id,filename=filename,
             mime='text/plain; charset=utf-8',body=text.encode(),request_hash=digest(filename+'\n'+text))
 
-    async def search(self,query,limit=10):
+    async def search(self,query,limit=10,mode="hybrid"):
         self.require()
+        if mode not in {"hybrid","lexical","semantic"}:raise ValueError("Use hybrid, lexical or semantic")
         vector=None
-        if self.embeddings:
+        if self.embeddings and mode!="lexical":
             from .embeddings import EmbeddingError
             try:vector=await asyncio.wait_for(self.embeddings.embed(query,query=True),getattr(self,'recall_timeout',2.0))
             except (EmbeddingError,ValueError,asyncio.TimeoutError):pass  # lexical search remains useful during quota/network/size failures
-        return await self.store.search(query,vector=vector,limit=limit)
+        return await self.store.search(query,vector=vector,limit=limit,mode=mode if vector is not None else "lexical")
 
     async def history_get(self,ids):
         cap=self.require()

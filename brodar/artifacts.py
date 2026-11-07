@@ -90,7 +90,7 @@ class Artifacts:
         if (PurePosixPath(filename).name!=filename or '\\' in filename or not filename.strip() or len(filename)>180
                 or filename in {'.','..'} or any(ord(c)<32 for c in filename)):
             raise ValueError('Use a filename without directory components')
-        if len(body)>20_000_000:raise ValueError('Artifact exceeds 20 MB')
+        if len(body)>50_000_000:raise ValueError('Artifact exceeds 50 MB')
         uid=str(uuid5(NAMESPACE_URL,f'{self.store.scope.audience}:{turn_id}:{operation_id}'))
         old=await self.get_record(uid)
         if old:
@@ -126,17 +126,29 @@ class Artifacts:
                 return rows[0] if rows else None
         return await self.store.db.run(read)
 
-    async def read(self,uid):
+    async def read(self,uid,*,approval_id=None,approvals=None):
         row=await self.get_record(uid)
         if row is None:raise ValueError('Artifact not found in this audience')
+        if (row.get('metadata') or {}).get('sensitive'):
+            if not approval_id or approvals is None:raise PermissionError('Sensitive file requires owner DM approval')
+            await approvals.consume(self.store.scope,approval_id,uid,row['content_hash'])
         body=await self.objects.get(row['object_key'])
         if hashlib.sha256(body).hexdigest()!=row['content_hash']:raise RuntimeError('Artifact checksum mismatch')
         return row,body
 
+    async def protect(self,uid):
+        uid=str(UUID(uid))
+        def update():
+            with self.store.db.transaction(self.store.scope.audience) as c:
+                c.execute("UPDATE brodar_v2.artifacts SET metadata=metadata || '{\"sensitive\":true}'::jsonb WHERE audience=%s AND id=%s RETURNING id",(self.store.scope.audience,uid))
+                if not c.fetchone():raise ValueError('Artifact not found')
+                return {'protected':True,'artifact_id':uid}
+        return await self.store.db.run(update)
+
     async def list(self,query='',limit=30):
         def read():
             with self.store.db.transaction(self.store.scope.audience,readonly=True) as c:
-                c.execute('SELECT * FROM brodar_v2.artifacts WHERE audience=%s AND filename ILIKE %s '
+                c.execute("SELECT * FROM brodar_v2.artifacts WHERE audience=%s AND NOT coalesce((metadata->>'sensitive')::boolean,false) AND filename ILIKE %s "
                     'ORDER BY created_at DESC LIMIT %s',(self.store.scope.audience,'%'+query+'%',max(1,min(limit,100))))
                 return [self.public(row) for row in records(c)]
         return await self.store.db.run(read)

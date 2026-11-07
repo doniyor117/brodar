@@ -25,14 +25,21 @@ class Maintenance:
         self.task=None
         self.worker=None
         self.index_retry_at=0
+        self.last_activity=time.monotonic()
+        self.index_task=None
+
+    def idle(self):
+        return not self.busy() and time.monotonic()-self.last_activity>=getattr(self.cfg,"maintenance_idle_seconds",300)
 
     def preempt(self):
+        self.last_activity=time.monotonic()
+        if self.index_task:self.index_task.cancel()
         # Revoke synchronously before cancellation crosses an await.
         if self.worker:self.worker.broker.end()
         if self.task:self.task.cancel()
 
     async def run(self,scope):
-        if self.busy() or self.semaphore.locked():return
+        if not self.idle() or self.semaphore.locked():return
         self.task=asyncio.create_task(self._run(scope),name='brodar-reflection-run')
         try:await self.task
         except asyncio.CancelledError:
@@ -43,7 +50,7 @@ class Maintenance:
     async def _run(self,scope):
         start=time.monotonic()
         async with self.semaphore:
-            if self.busy():return
+            if not self.idle():return
             self.worker=worker=await self.factory(scope)
             run=None
             try:
@@ -51,7 +58,7 @@ class Maintenance:
                 if not run:return
                 async with asyncio.timeout(self.cfg.maintenance_timeout):
                     await worker.start(maintenance=True)
-                    if self.busy():return
+                    if not self.idle():return
                     cap=TurnCapability(run['id'],mode='reflection')
                     worker.broker.begin(cap)
                     notes=await worker.store.memory_list(40)

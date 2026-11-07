@@ -77,6 +77,8 @@ class Conversation:
         self._steer_lock=asyncio.Lock()
         self._turn_lock=asyncio.Lock()
         self._accept_steer=False
+        self._signal_task=None
+        self._presence_generation=None
         self._last_ambient=0
         self._cancelled=False
         self._turn_id=None
@@ -129,12 +131,23 @@ class Conversation:
     async def signal(self,*,direct=False):
         self.wake.set()
         if direct:self.direct.set()
+        if self._signal_task is None or self._signal_task.done():
+            self._signal_task=asyncio.create_task(self._steer_pending(),name='brodar-steer')
+            self._signal_task.add_done_callback(self._signal_done)
+
+    def _signal_done(self,task):
+        if not task.cancelled() and task.exception():
+            log.warning('Steering deferred: %s',type(task.exception()).__name__)
+
+    async def _steer_pending(self):
         async with self._steer_lock:
             if not self._accept_steer:return
             batch=await self.store.claim_inputs(count_attempt=False,exclude_ids=[r['id'] for r in self.inflight])
             if not batch:return
-            if any((r['payload'].get('message') or r['payload'].get('edited_message') or {}).get('document') or
-                   (r['payload'].get('message') or r['payload'].get('edited_message') or {}).get('photo') for r in batch):
+            def has_media(row):
+                message=row['payload'].get('message') or row['payload'].get('edited_message') or {}
+                return any(message.get(kind) for kind in ('document','photo','video','animation','audio','voice','video_note','sticker'))
+            if any(has_media(row) for row in batch):
                 await self.store.finish_inputs([r['id'] for r in batch],retry=True)
                 return  # materialize media in the next durable foreground turn
             messages=await self.store.history_get([str(r['message_id']) for r in batch])
@@ -193,6 +206,7 @@ class Conversation:
 
     async def _process_guarded(self):
         self._turn_id=None
+        if self.presence:self._presence_generation=self.presence.generation(self.store.scope)
         renewal=asyncio.create_task(self._renew_inputs())
         try:
             await self._process()
@@ -212,7 +226,7 @@ class Conversation:
             await asyncio.gather(renewal,return_exceptions=True)
             self.broker.end()
             self.inflight=[]
-            if self.presence and not self.wake.is_set():await self.presence.stop(self.store.scope)
+            if self.presence and not self.wake.is_set():await self.presence.stop(self.store.scope,generation=self._presence_generation)
 
     async def _renew_inputs(self):
         while True:
@@ -241,7 +255,7 @@ class Conversation:
         from .redaction import scrub
         for row in batch:
             payload=row['payload'];message=payload.get('message') or payload.get('edited_message') or {}
-            document=message.get('document');photos=message.get('photo') or []
+            document=next((message.get(k) for k in ('document','video','animation','audio','voice','video_note','sticker') if message.get(k)),None);photos=message.get('photo') or []
             media=document or (photos[-1] if photos else None)
             if not media or (media.get('file_size') or 0)>20_000_000:continue
             turn_id=str(uuid5(NAMESPACE_URL,f'inbound:{self.store.scope.bot_id}:{row["update_id"]}'))
@@ -251,7 +265,7 @@ class Conversation:
             else:
                 file=await self.bot.get_file(media['file_id'])
                 body=bytes(await file.download_as_bytearray())
-                filename=(document.get('file_name') or 'document') if document else f'photo-{message["message_id"]}.jpg'
+                filename=(document.get('file_name') or ('media-'+media['file_unique_id'] if media.get('file_unique_id') else 'media')) if document else f'photo-{message["message_id"]}.jpg'
                 filename=Path(filename.replace('\\','/')).name[:180]
                 mime=(document.get('mime_type') or 'application/octet-stream') if document else 'image/jpeg'
                 artifact=await self.broker.artifacts.put(turn_id=turn_id,operation_id='attachment',filename=filename,
@@ -284,7 +298,7 @@ class Conversation:
         bundle=await self.store.turn_context(ids,self._turn_id,self.embeddings.model if self.embeddings else None)
         messages,context,notes=bundle['messages'],bundle['context'],bundle['notes']
         query='\n'.join(m['content'] for m in messages)[-1800:]
-        if self.embeddings and len(query)>=20 and bundle['has_index']:
+        if getattr(self.cfg,'automatic_recall',False) and self.embeddings and len(query)>=20 and bundle['has_index']:
             try:
                 vector=await asyncio.wait_for(self.embeddings.embed(query,query=True),
                     timeout=getattr(self.cfg,'recall_timeout_seconds',2.0))
@@ -367,6 +381,9 @@ class Conversation:
             self.broker.end()
 
     async def close(self):
+        if self._signal_task:
+            self._signal_task.cancel()
+            await asyncio.gather(self._signal_task,return_exceptions=True)
         self.broker.end()
         if self.presence:await self.presence.stop(self.store.scope)
         if self.task:
@@ -384,15 +401,19 @@ async def run(cfg):
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise RuntimeError('A Brodar process is already using this runtime directory') from None
     db=Postgres(cfg.database_url)
-    chat_db=Postgres(cfg.database_url)
+    room_dbs=[]
     learning_db=Postgres(cfg.database_url)
     jobs_db=Postgres(cfg.database_url)
     embeddings=GeminiEmbeddings(cfg.google_key) if cfg.google_key else None
     bot=Bot(cfg.telegram_token)
     presence=TypingPresence(bot)
     objects=ObjectStore.from_file(cfg.storage_config)
+    from .approvals import Approvals
+    approval_service=Approvals(db,bot,cfg)
     conversations={}
     creating={}
+    dispatch_tasks={}
+    dispatch_flags={}
     semaphore=asyncio.Semaphore(cfg.max_concurrent_turns)
     lease=None
 
@@ -400,8 +421,14 @@ async def run(cfg):
         key=scope.conversation
         if key not in conversations:
             async def create():
-                conversation=Conversation(cfg,LearningStore(chat_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,objects,
+                room_db=Postgres(cfg.database_url)
+                room_dbs.append(room_db)
+                conversation=Conversation(cfg,LearningStore(room_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,objects,
                                           delivery_guard=lease.require,presence=presence)
+                audit_db=Postgres(cfg.database_url)
+                room_dbs.append(audit_db)
+                conversation.broker.audit_store=LearningStore(audit_db,scope,lease_owner=lease.owner)
+                conversation.broker.approvals=approval_service
                 await conversation.start()
                 conversations[key]=conversation
                 return conversation
@@ -412,26 +439,53 @@ async def run(cfg):
                 if pending.done() and creating.get(key) is pending:creating.pop(key,None)
         return conversations[key]
 
+    def dispatch(scope,direct):
+        key=scope.conversation
+        dispatch_flags[key]=dispatch_flags.get(key,False) or direct
+        if key in dispatch_tasks:return
+        async def deliver_signal():
+            try:
+                while key in dispatch_flags:
+                    priority=dispatch_flags.pop(key)
+                    conversation=await get_conversation(scope)
+                    await conversation.signal(direct=priority)
+            except Exception as exc:log.error('Room dispatch deferred: %s',type(exc).__name__)
+            finally:dispatch_tasks.pop(key,None)
+        dispatch_tasks[key]=asyncio.create_task(deliver_signal(),name='brodar-dispatch')
+
     from .reflection import Maintenance
     async def make_worker(scope):
         return Conversation(cfg,LearningStore(learning_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,
                             delivery_guard=lease.require)
-    learning=Maintenance(cfg,make_worker,semaphore,
-        lambda:any(c.wake.is_set() or c.inflight for c in conversations.values()))
+    learning=Maintenance(cfg,make_worker,asyncio.Semaphore(1),
+        lambda:bool(creating) or bool(dispatch_tasks) or any(c.wake.is_set() or c.inflight or c._turn_lock.locked() for c in conversations.values()))
 
     async def maintain(bot_id):
         while True:
             for chat_id in cfg.allowed_chats:
                 scope=Scope(bot_id,chat_id,instance_id=cfg.instance_id)
                 store=LearningStore(learning_db,scope,lease_owner=lease.owner)
+                if not learning.idle():break
                 if embeddings and time.monotonic()>=learning.index_retry_at:
-                    try:
-                        for row in await store.index_candidates(embeddings.model):
-                            vectors=[await asyncio.wait_for(embeddings.embed(part),10) for part in chunks(row['content'])]
-                            await store.index_document(row['kind'],str(row['id']),row['content'],vectors,embeddings.model)
+                    async def index_batch():
+                        rows=await store.index_candidates(embeddings.model,limit=24)
+                        parts=[chunks(row['content']) for row in rows]
+                        flat=[part for group in parts for part in group]
+                        if not flat or not learning.idle():return
+                        vectors=await asyncio.wait_for(embeddings.embed_batch(flat),15)
+                        offset=0;documents=[]
+                        for row,group in zip(rows,parts):
+                            documents.append(dict(row,vectors=vectors[offset:offset+len(group)]))
+                            offset+=len(group)
+                        if learning.idle():await store.index_documents(documents,embeddings.model)
+                    learning.index_task=asyncio.create_task(index_batch())
+                    try:await learning.index_task
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():raise
                     except Exception as exc:
                         log.warning('Index maintenance deferred: %s',type(exc).__name__)
                         learning.index_retry_at=time.monotonic()+60
+                    finally:learning.index_task=None
                 if cfg.learning_enabled:await learning.run(scope)
             await asyncio.sleep(60)
 
@@ -499,12 +553,20 @@ async def run(cfg):
                 message=update.effective_message
                 raw=update.to_dict()
                 raw_message=raw.get('message') or raw.get('edited_message') or {}
-                if message is not None and message.chat_id in cfg.allowed_chats and ordinary_message(raw_message):
+                approval_handled=False
+                if message is not None:
+                    approval_handled=await approval_service.decide(message.chat_id,
+                        message.from_user.id if message.from_user else None,message.text or '',me.id,
+                        private=message.chat.type=='private',anonymous=message.sender_chat is not None or message.edit_date is not None or any(raw_message.get(k) for k in ('forward_origin','forward_from','forward_sender_name')))
+                if approval_handled:
+                    pass  # consumed by host; never authorizes changes through model text
+                elif message is not None and message.chat_id in cfg.allowed_chats and ordinary_message(raw_message):
                     sender=message.from_user if message.sender_chat is None else None
                     scope=Scope(me.id,message.chat_id,message.message_thread_id or 0,cfg.instance_id)
                     text,service=describe_message(raw_message)
                     direct=addressed(raw_message,me.id,me.username)
-                    if direct and not service and not (sender and sender.is_bot):presence.start(scope)
+                    if not service and not (sender and sender.is_bot):learning.preempt()
+                    if direct and not service and not (sender and sender.is_bot):presence.start(scope,new_work=True)
                     if message.edit_date is not None and scope.conversation in conversations:
                         mid=str(uuid5(NAMESPACE_URL,f'{scope.audience}:telegram:{message.message_id}'))
                         conversations[scope.conversation].broker.revoke_request_ids([mid])
@@ -521,14 +583,14 @@ async def run(cfg):
                     if new and not service:
                         if not (sender and sender.is_bot):
                             learning.preempt()
-                        conversation=await get_conversation(scope)
                         if text.split('@',1)[0].strip()=='/cancel' and sender:
+                            conversation=await get_conversation(scope)
                             await conversation.cancel(sender.id)
                             await store.finish_inputs([iid])
                         elif sender and sender.is_bot:
                             await store.finish_inputs([iid])  # context retained; no bot-to-bot reply loop
                         else:
-                            await conversation.signal(direct=direct)
+                            dispatch(scope,direct)
                 elif message is not None:
                     if not ordinary_message(raw_message):log.warning('Recipient-scoped Telegram input omitted from ordinary chat history')
                     else:log.warning('Unconfigured chat observed: id=%s type=%s',message.chat_id,message.chat.type)
@@ -551,6 +613,10 @@ async def run(cfg):
         if maintenance:
             maintenance.cancel()
             await asyncio.gather(maintenance,return_exceptions=True)
+        for pending_creation in creating.values():pending_creation.cancel()
+        await asyncio.gather(*list(creating.values()),return_exceptions=True)
+        for pending_dispatch in dispatch_tasks.values():pending_dispatch.cancel()
+        await asyncio.gather(*list(dispatch_tasks.values()),return_exceptions=True)
         await asyncio.gather(*(c.close() for c in conversations.values()),return_exceptions=True)
         await presence.close()
         await bot.shutdown()
@@ -558,7 +624,7 @@ async def run(cfg):
         if objects:await objects.close()
         if lease:await lease.release()
         await db.close()
-        await chat_db.close()
+        await asyncio.gather(*(room_db.close() for room_db in room_dbs),return_exceptions=True)
         await learning_db.close()
         await jobs_db.close()
         lock.close()

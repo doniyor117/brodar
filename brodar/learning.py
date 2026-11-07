@@ -155,20 +155,33 @@ class LearningStore(RuntimeStore):
         import math
         if not vectors or any(len(v)!=768 or not all(math.isfinite(x) for x in v) for v in vectors):
             raise ValueError('Invalid embedding vectors')
-        table='messages' if kind=='message' else 'memory_documents'
+        return str(source_id) in await self.index_documents([{'kind':kind,'id':source_id,'content':text,'vectors':vectors}],model)
+
+    async def index_documents(self,rows,model):
+        """Persist a bounded batch atomically, rechecking original versions under locks."""
+        import math
+        if len(rows)>32:raise ValueError('Index batch too large')
+        for row in rows:
+            if row['kind'] not in {'message','memory'}:raise ValueError('Invalid embedding source')
+            if not row['vectors'] or any(len(v)!=768 or not all(math.isfinite(x) for x in v) for v in row['vectors']):raise ValueError('Invalid vectors')
         def op():
             with self.db.transaction(self.scope.audience) as c:
-                c.execute(f'SELECT content FROM brodar_v2.{table} WHERE audience=%s AND id=%s '+
-                    ('AND NOT deleted AND NOT needs_review ' if kind=='memory' else '')+'FOR UPDATE',(self.scope.audience,source_id))
-                row=c.fetchone()
-                if not row or row[0]!=text:return False
-                c.execute('DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind=%s AND source_id=%s AND model=%s',
-                    (self.scope.audience,kind,source_id,model))
-                for index,vector in enumerate(vectors):
-                    c.execute('INSERT INTO brodar_v2.embeddings(audience,kind,source_id,model,dimensions,content_hash,embedding,chunk_index) '
-                        'VALUES (%s,%s,%s,%s,768,%s,%s::vector,%s)',
-                        (self.scope.audience,kind,source_id,model,digest(text),json.dumps(vector),index))
-                return True
+                valid=[]
+                for kind,table in [('message','messages'),('memory','memory_documents')]:
+                    candidates={str(row['id']):row for row in rows if row['kind']==kind}
+                    if not candidates:continue
+                    c.execute(f'SELECT id,content FROM brodar_v2.{table} WHERE audience=%s AND id=ANY(%s::uuid[]) '+
+                        ('AND NOT deleted AND NOT needs_review ' if kind=='memory' else '')+'ORDER BY id FOR UPDATE',
+                        (self.scope.audience,list(candidates)))
+                    valid.extend(candidates[str(uid)] for uid,text in c.fetchall() if text==candidates[str(uid)]['content'])
+                if not valid:return []
+                sources=json.dumps([{'kind':r['kind'],'id':str(r['id'])} for r in valid])
+                c.execute("DELETE FROM brodar_v2.embeddings e USING jsonb_to_recordset(%s::jsonb) AS s(kind text,id uuid) WHERE e.audience=%s AND e.model=%s AND e.kind=s.kind AND e.source_id=s.id",(sources,self.scope.audience,model))
+                values=[{'kind':r['kind'],'id':str(r['id']),'hash':digest(r['content']),'embedding':json.dumps(v),'chunk':i}
+                    for r in valid for i,v in enumerate(r['vectors'])]
+                c.execute("INSERT INTO brodar_v2.embeddings(audience,kind,source_id,model,dimensions,content_hash,embedding,chunk_index) SELECT %s,s.kind,s.id,%s,768,s.hash,s.embedding::vector,s.chunk FROM jsonb_to_recordset(%s::jsonb) AS s(kind text,id uuid,hash text,embedding text,chunk int)",
+                    (self.scope.audience,model,json.dumps(values)))
+                return [str(r['id']) for r in valid]
         return await self.db.run(op)
 
 

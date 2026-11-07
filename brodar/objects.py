@@ -26,7 +26,7 @@ class ObjectStore:
         await asyncio.to_thread(self.client.put_object,Bucket=bucket or self.bucket,Key=key,
             Body=body,ContentType=mime)
 
-    async def get(self,key,*,bucket=None,max_bytes=20_000_000):
+    async def get(self,key,*,bucket=None,max_bytes=50_000_000):
         def fetch():
             response=self.client.get_object(Bucket=bucket or self.bucket,Key=key)
             stream=response['Body']

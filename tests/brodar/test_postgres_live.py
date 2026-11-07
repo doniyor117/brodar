@@ -25,7 +25,7 @@ async def stores():
     def cleanup():
         for s in [a,b]:
             with db.transaction(s.scope.audience) as c:
-                for table in ['maintenance_runs','reflection_state','memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources','jobs']:
+                for table in ['approvals','maintenance_runs','reflection_state','memory_sources','memory_revisions','memory_documents','embeddings','inbox','messages','sessions','forgotten_sources','jobs']:
                     c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(s.scope.audience,))
                 c.execute('DELETE FROM brodar_v2.poll_state WHERE bot_id=%s',(bot_id,))
                 c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(s.scope.audience,))
@@ -270,3 +270,29 @@ async def test_review_flag_requires_source_read_evidence(stores):
     assert (await a.memory_read('context/person.md'))['needs_review']
     await a.memory_write('context/person.md','uzbek',expected_revision=2,reason='checked original',reviewed_sources={mid:__import__('hashlib').sha256(b'prefers explanations in uzbek').hexdigest()})
     assert not (await a.memory_read('context/person.md'))['needs_review']
+
+@pytest.mark.asyncio
+async def test_batched_index_and_exact_owner_approval(stores):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from brodar.learning import LearningStore
+    from brodar.approvals import Approvals
+    a,b=stores
+    await add(a,'batch indexing evidence')
+    row=(await a.recent())[0]
+    learning=LearningStore(a.db,a.scope)
+    vector=[1.0]+[0.0]*767
+    assert await learning.index_documents([dict(kind='message',id=str(row['id']),content=row['content'],vectors=[vector])],'test-batch')==[str(row['id'])]
+    assert await learning.index_documents([dict(kind='message',id=str(row['id']),content='stale edit',vectors=[vector])],'test-batch')==[]
+    cfg=SimpleNamespace(owner_ids={42},allowed_chats={-11,-22},instance_id=a.scope.instance_id)
+    approvals=Approvals(a.db,SimpleNamespace(send_message=AsyncMock()),cfg)
+    artifact_id=str(uuid4());content_hash='test-hash'
+    request=await approvals.request(a.scope,str(uuid4()),artifact_id,content_hash,'synthetic test')
+    uid=request['approval_id']
+    assert await approvals.decide(42,42,'/approve '+uid,a.scope.bot_id,private=True)
+    with pytest.raises(PermissionError):await approvals.consume(b.scope,uid,artifact_id,content_hash)
+    await approvals.consume(a.scope,uid,artifact_id,content_hash)
+    with pytest.raises(PermissionError):await approvals.consume(a.scope,uid,artifact_id,content_hash)
+    def cleanup():
+        with a.db.transaction(a.scope.audience) as c:c.execute('DELETE FROM brodar_v2.approvals WHERE audience=%s',(a.scope.audience,))
+    await a.db.run(cleanup)

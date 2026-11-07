@@ -40,6 +40,7 @@ async def test_learning_preemption_revokes_before_cancel_and_never_checkpoints()
         start=AsyncMock(),close=AsyncMock())
     cfg=SimpleNamespace(consolidation_enabled=False,consolidation_interval=60,maintenance_timeout=10)
     service=Maintenance(cfg,AsyncMock(return_value=worker),asyncio.Semaphore(1),lambda:False)
+    service.last_activity=0
     task=asyncio.create_task(service.run(None))
     await entered.wait()
     service.preempt()
@@ -57,6 +58,7 @@ async def test_successful_no_change_can_checkpoint_without_note_writes():
     worker=SimpleNamespace(store=store,broker=broker,brain=SimpleNamespace(turn=AsyncMock(return_value=Outcome('completed','skip','nothing new'))),start=AsyncMock(),close=AsyncMock())
     cfg=SimpleNamespace(consolidation_enabled=False,consolidation_interval=60,maintenance_timeout=10)
     service=Maintenance(cfg,AsyncMock(return_value=worker),asyncio.Semaphore(1),lambda:False)
+    service.last_activity=0
     await service.run(None)
     store.maintenance_finish.assert_awaited_once()
     assert broker.capability is None

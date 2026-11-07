@@ -239,7 +239,7 @@ class ScopedStore:
         return await self.db.run(op)
 
     async def search(self, query: str, *, vector: list[float] | None = None,
-                     model: str = 'gemini-embedding-2', limit: int = 10):
+                     model: str = 'gemini-embedding-2', limit: int = 10, mode: str = 'hybrid'):
         """Hybrid RRF retrieval; archived originals and notes carry source IDs."""
         limit = max(1,min(limit,30))
         if not query.strip() or len(query)>4000:
@@ -259,6 +259,7 @@ class ScopedStore:
                           "AND (to_tsvector('simple',content) @@ plainto_tsquery('simple',%s) OR content ILIKE %s) "
                           "ORDER BY updated_at DESC LIMIT 40",(self.scope.audience,query,'%'+query+'%'))
                 notes = records(c)
+                if mode=='semantic':lexical=[];notes=[]
                 semantic = []
                 if vector is not None:
                     from .embeddings import DIMENSIONS

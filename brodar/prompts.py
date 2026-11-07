@@ -22,6 +22,13 @@ def compose(*,model:str,provider:str,tools:list[str],timezone:str='UTC'):
     runtime+=f'configured local timezone: {timezone}\n'
     runtime+='\nuse the exact tool names supplied by the runtime. available brodar tools:\n'
     runtime+='\n'.join('- '+name for name in tools)
+    runtime+='\nUse skills_list and skill_read to discover installed workflows and bundled references when helpful. '
+    runtime+='Skills do not imply unavailable integrations or shell access; report a concrete missing capability. '
+    runtime+='Use history_search (hybrid/semantic/lexical), history_get and history browsing to investigate older conversations on demand. '
+    runtime+='Durable artifacts are this audience workspace. Use artifact_list/read, create_file or workspace_save; stored files survive phone loss. '
+    runtime+='Sensitive file reads require request_file_approval and an approval_id from verified owner DM consent. '
+    runtime+='Wait for actual approval; never claim it was granted or the file was read prematurely. '
+    runtime+='No isolated shell worker is configured. Never claim scripts were executed. Never disclose credentials.\n'
     return fixed+runtime,revision
 
 
@@ -34,6 +41,15 @@ def envelope(messages,*,context=None,notes=None,receipts=None):
                                    'legacy_timestamp','reply_to_id','topic_id','source','chunk_start','chunk_end','content_length'] if m.get(k) is not None}
         return '<message metadata='+quoteattr(json.dumps(meta,default=str,ensure_ascii=False))+'>'+escape(m.get('content',''))+'</message>'
     blocks=[]
+    if context:
+        remaining=12000;selected=[]
+        for item in reversed(context):
+            if remaining<=0:break
+            text=item.get('content','')
+            part=text[:remaining]
+            selected.append(dict(item,content=part+(' [historical excerpt truncated; use history_get for full text]' if len(part)<len(text) else '')))
+            remaining-=len(part)
+        context=list(reversed(selected))
     if context:blocks.append('<historical_context>'+''.join(xmlmessage(m) for m in context)+'</historical_context>')
     if notes:blocks.append('<learned_context>'+escape(json.dumps(notes,default=str,ensure_ascii=False))+'</learned_context>')
     if receipts:blocks.append('<previous_delivery_receipts>'+escape(json.dumps(receipts,default=str))+'</previous_delivery_receipts>')

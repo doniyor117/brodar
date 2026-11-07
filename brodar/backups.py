@@ -18,7 +18,7 @@ from cryptography.fernet import Fernet
 from .store import records
 
 SCOPED = ('messages','memory_documents','memory_revisions','memory_sources',
-          'embeddings','inbox','sessions','deliveries','jobs','reflection_state','maintenance_runs',
+          'embeddings','inbox','sessions','deliveries','jobs','reflection_state','maintenance_runs','approvals',
           'forgotten_sources','tool_calls','artifacts')
 GLOBAL = ('audience_registry','poll_state')
 FORMAT = 1

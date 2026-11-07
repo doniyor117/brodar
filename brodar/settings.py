@@ -30,6 +30,8 @@ class Settings:
     consolidation_enabled:bool=False
     consolidation_interval:float=21600
     maintenance_timeout:float=120
+    maintenance_idle_seconds:float=300
+    automatic_recall:bool=False
 
     @classmethod
     def load(cls,*,env_file:Path|None=None,brain:str|None=None):
@@ -42,7 +44,7 @@ class Settings:
         model=values.get('BRODAR_'+provider.upper()+'_MODEL',
                          'gpt-6.1-sol' if provider=='codex' else 'claude-sonnet-4-6')
         ids=lambda v:frozenset(int(x.strip()) for x in v.split(',') if x.strip())
-        cfg=cls(learning_enabled=values.get('BRODAR_LEARNING_ENABLED','true').lower()=='true',
+        cfg=cls(maintenance_idle_seconds=float(values.get('BRODAR_MAINTENANCE_IDLE_SECONDS','300')),automatic_recall=values.get('BRODAR_AUTOMATIC_RECALL','false').lower()=='true',learning_enabled=values.get('BRODAR_LEARNING_ENABLED','true').lower()=='true',
                 consolidation_enabled=values.get('BRODAR_CONSOLIDATION_ENABLED','false').lower()=='true',
                 consolidation_interval=float(values.get('BRODAR_CONSOLIDATION_INTERVAL','21600')),
                 maintenance_timeout=float(values.get('BRODAR_MAINTENANCE_TIMEOUT','120')),auto_compact_token_limit=int(values['BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT']) if values.get('BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT') else None,
@@ -60,6 +62,7 @@ class Settings:
                 timezone=values.get('BRODAR_TIMEZONE','UTC'),
                 max_concurrent_turns=int(values.get('BRODAR_MAX_CONCURRENT_TURNS','2')))
         if cfg.auto_compact_token_limit is not None and cfg.auto_compact_token_limit<1000:raise ValueError('Compaction threshold must be at least 1000 tokens')
+        if cfg.maintenance_idle_seconds<1:raise ValueError('Idle window must be positive')
         if cfg.consolidation_interval<60 or cfg.maintenance_timeout<1:raise ValueError('Invalid maintenance timing')
         if cfg.recall_timeout_seconds<=0:raise ValueError('Recall timeout must be positive')
         from zoneinfo import ZoneInfo
