@@ -2,7 +2,7 @@
 
 ## telegram_send_message
 
-Send text to the current chat/topic. Use a stable unique operation_id; delivery receipts prevent replay.
+Send text to the current chat/topic. Use a stable unique operation_id; delivery receipts prevent replay. final=true (default) stops typing before delivery. Use final=false only for an interim progress message when more user-facing work will follow.
 
 ## telegram_react
 
@@ -110,7 +110,7 @@ Create a durable text/code/CSV/Markdown file artifact. This does not write the h
 
 ## telegram_send_document
 
-Deliver a stored artifact to the current chat/topic and confirm the actual Telegram message ID.
+Deliver a stored artifact to the current chat/topic and confirm the actual Telegram message ID. final=true (default) stops typing; use final=false for an intermediate file when more output will follow.
 
 ## workspace_save
 

@@ -107,8 +107,8 @@ def build_tools(broker):
     mcp=AuditedMcp(broker)
 
     @mcp.tool()
-    async def telegram_send_message(text:str,operation_id:str,reply_to_message_id:int|None=None)->str:
-        return result(await broker.send_message(text,call_id=operation_id,reply_to_message_id=reply_to_message_id))
+    async def telegram_send_message(text:str,operation_id:str,reply_to_message_id:int|None=None,final:bool=True)->str:
+        return result(await broker.send_message(text,call_id=operation_id,reply_to_message_id=reply_to_message_id,final=final))
 
     @mcp.tool()
     async def telegram_react(message_id:int,emoji:str,operation_id:str)->str:
@@ -284,8 +284,8 @@ def build_tools(broker):
             return result(await broker.create_file(filename,text,operation_id))
 
         @mcp.tool()
-        async def telegram_send_document(artifact_id:str,operation_id:str,caption:str='')->str:
-            return result(await broker.send_document(artifact_id,caption,operation_id))
+        async def telegram_send_document(artifact_id:str,operation_id:str,caption:str='',final:bool=True)->str:
+            return result(await broker.send_document(artifact_id,caption,operation_id,final=final))
 
         @mcp.tool()
         async def workspace_save(filename:str,body_base64:str,operation_id:str,mime_type:str='application/octet-stream',sensitive:bool=False)->str:

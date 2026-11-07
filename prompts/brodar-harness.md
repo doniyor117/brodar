@@ -28,7 +28,7 @@ finish with the required structured result:
 
 include a short internal reason. never send this JSON into Telegram. if delivery fails, don't pretend it worked. follow the actual error and retry policy; don't invent another route around a denied action.
 
-for a job that takes a while, one short heads-up is enough. get on with the job, update that message if useful, then deliver the result. don't narrate every tool call. if the user cancels, stop the job and don't deliver stale results.
+for a job that takes a while, one short heads-up is enough. set final=false on interim Telegram messages/files; leave final=true for the finished answer so typing ends with delivery. get on with the job, update that message if useful, then deliver the result. don't narrate every tool call. if the user cancels, stop the job and don't deliver stale results.
 
 # making things
 

@@ -67,6 +67,7 @@ class Conversation:
         self._saved_session=None
         self.broker=ToolBroker(store,bot,embeddings=embeddings,artifacts=Artifacts(store,objects) if objects else None,
                                delivery_guard=delivery_guard,owner_ids=getattr(cfg,'owner_ids',()))
+        self.broker.before_final_delivery=self._stop_typing
         self.broker.recall_timeout=getattr(cfg,'recall_timeout_seconds',2.0)
         self.mcp=ScopedMcpServer(self.broker)
         self.shared_group=None
@@ -90,6 +91,10 @@ class Conversation:
         self.root=cfg.runtime_dir/'providers'/cfg.brain/key
         from .commands import CommandGateway
         self.broker.commands=CommandGateway(cfg.runtime_dir/'workspaces'/key)
+
+    async def _stop_typing(self,cap=None):
+        if self.presence and (cap is None or self.broker.capability is cap):
+            await self.presence.stop(self.store.scope,generation=self._presence_generation)
 
     async def start(self, *, maintenance=False,resource=False):
         if self.shared_group is not None and not maintenance and not resource:
@@ -174,6 +179,7 @@ class Conversation:
                 return
             accepted=await self.brain.steer(authorized(envelope(messages),cap))
             if accepted:
+                if self.presence:self._presence_generation=max(self._presence_generation or 0,self.presence.for_inputs(self.store.scope,[r.get('update_id') for r in batch]))
                 self.inflight.extend(batch)
                 refreshed=await self.store.mark_inputs_attempted([r['id'] for r in batch])
                 by_id={r['id']:r for r in refreshed}
@@ -230,7 +236,7 @@ class Conversation:
 
     async def _process_guarded(self):
         self._turn_id=None
-        if self.presence:self._presence_generation=self.presence.generation(self.store.scope)
+        self._presence_generation=0
         renewal=asyncio.create_task(self._renew_inputs())
         try:
             await self._process()
@@ -250,7 +256,7 @@ class Conversation:
             await asyncio.gather(renewal,return_exceptions=True)
             self.broker.end()
             self.inflight=[]
-            if self.presence and not self.wake.is_set():await self.presence.stop(self.store.scope,generation=self._presence_generation)
+            if self.presence:await self._stop_typing()
 
     async def _renew_inputs(self):
         while True:
@@ -305,6 +311,9 @@ class Conversation:
         if not batch:return
         self._ambient_first=None;self._ambient_last=None
         self.inflight=list(batch)
+        if self.presence:
+            self._presence_generation=self.presence.for_inputs(self.store.scope,[r.get('update_id') for r in batch])
+            if self._presence_generation and self._presence_generation==self.presence.generation(self.store.scope):self.presence.start(self.store.scope)
         self._cancelled=False
         self._turn_id=str(batch[0]['id'])
         payload_message=batch[0]['payload'].get('message') or batch[0]['payload'].get('edited_message') or {}
@@ -360,6 +369,7 @@ class Conversation:
                 self._accept_steer=True
                 provider_started=time.monotonic()
                 outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),timeout=600)
+                if outcome.action in {'stop','skip'}:await self._stop_typing()
                 log.warning('Foreground provider turn seconds=%.2f continuation=%s status=%s',time.monotonic()-provider_started,continuation,outcome.status)
                 async with self._steer_lock:self._accept_steer=False
                 if self.brain.session_id and self.brain.session_id!=self._saved_session and not getattr(self.brain,'shared',False):
@@ -634,7 +644,7 @@ async def run(cfg):
                     text,service=describe_message(raw_message)
                     direct=addressed(raw_message,me.id,me.username)
                     if not service and not (sender and sender.is_bot):learning.preempt()
-                    if direct and not service and not (sender and sender.is_bot):presence.start(scope,new_work=True)
+                    if direct and not service and not (sender and sender.is_bot):presence.start(scope,new_work=True,update_id=update.update_id)
                     if message.edit_date is not None and scope.conversation in conversations:
                         mid=str(uuid5(NAMESPACE_URL,f'{scope.audience}:telegram:{message.message_id}'))
                         conversations[scope.conversation].broker.revoke_request_ids([mid])

@@ -11,11 +11,21 @@ class TypingPresence:
         self.bot,self.interval=bot,interval
         self.tasks={}
         self.generations={}
+        self.inputs={}
 
     def generation(self,scope):return self.generations.get(scope.conversation,0)
 
-    def start(self,scope,*,new_work=False):
-        if new_work:self.generations[scope.conversation]=self.generation(scope)+1
+    def for_inputs(self,scope,update_ids):
+        known=self.inputs.get(scope.conversation,{})
+        return max((known.get(uid,0) for uid in update_ids),default=0)
+
+    def start(self,scope,*,new_work=False,update_id=None):
+        if new_work:
+            self.generations[scope.conversation]=self.generation(scope)+1
+            if update_id is not None:
+                known=self.inputs.setdefault(scope.conversation,{})
+                known[update_id]=self.generation(scope)
+                while len(known)>256:known.pop(next(iter(known)))
         task=self.tasks.get(scope.conversation)
         if task is None or task.done():
             self.tasks[scope.conversation]=asyncio.create_task(self._run(scope),name='brodar-typing')
@@ -46,6 +56,6 @@ class TypingPresence:
             task.cancel();await asyncio.gather(task,return_exceptions=True)
 
     async def close(self):
-        tasks=list(self.tasks.values());self.tasks.clear();self.generations.clear()
+        tasks=list(self.tasks.values());self.tasks.clear();self.generations.clear();self.inputs.clear()
         for task in tasks:task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)

@@ -31,6 +31,7 @@ class ToolBroker:
         self.artifacts=artifacts
         self.approvals=None
         self.loop_guard=None
+        self.before_final_delivery=None
         self.delivery_guard=delivery_guard
         self.owner_ids=owner_ids
         self.capability=None
@@ -172,7 +173,7 @@ class ToolBroker:
         async def send():return await self.bot.edit_message_text(chat_id=self.store.scope.chat_id,message_id=message_id,text=text)
         return await self.deliver(cap,'edit_message',{'message_id':message_id,'text':text},operation_id,send)
 
-    async def send_message(self,text:str,*,call_id:str,reply_to_message_id:int|None=None):
+    async def send_message(self,text:str,*,call_id:str,reply_to_message_id:int|None=None,final:bool=True):
         cap=self.require(visible=True)
         from .redaction import scrub
         text=scrub(text)
@@ -201,9 +202,9 @@ class ToolBroker:
         if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
         if reply_to_message_id is not None:kwargs['reply_to_message_id']=reply_to_message_id
         async def send():return await self.bot.send_message(**kwargs)
-        return await self.deliver(cap,'send_message',{'text':text,'reply_to_message_id':reply_to_message_id},call_id,send)
+        return await self.deliver(cap,'send_message',{'text':text,'reply_to_message_id':reply_to_message_id},call_id,send,final=final)
 
-    async def deliver(self,cap,method,request,call_id,send,*,preflight=None):
+    async def deliver(self,cap,method,request,call_id,send,*,preflight=None,final=False):
         if not call_id or len(call_id)>200:raise ValueError('Use an operation ID of 1 to 200 characters')
         async with self._delivery_lock:
             if self.capability is not cap:raise PermissionError('Turn was cancelled')
@@ -216,7 +217,9 @@ class ToolBroker:
                 raise PermissionError('Turn was cancelled before delivery')
             if receipt['request']!=request or receipt['method']!=method:
                 raise ValueError('Operation ID was already used for a different delivery')
-            if receipt['status']=='sent':return receipt['response']
+            if receipt['status']=='sent':
+                if final and self.before_final_delivery:await self.before_final_delivery(cap)
+                return receipt['response']
             if receipt['status']!='pending':
                 raise RuntimeError('Previous delivery is failed, in progress or uncertain; do not blindly replay it')
             if self.delivery_guard or preflight:
@@ -228,6 +231,7 @@ class ToolBroker:
                     await asyncio.shield(self.store.delivery_finish(receipt['id'],'failed',{'error':'delivery_guard_rejected_before_send'}))
                     raise
             try:
+                if final and self.before_final_delivery:await self.before_final_delivery(cap)
                 sent=await send()
             except (BadRequest,Forbidden,RetryAfter) as exc:
                 await self.store.delivery_finish(receipt['id'],'failed',{'error':type(exc).__name__})
@@ -254,7 +258,7 @@ class ToolBroker:
                 logging.getLogger('brodar.metrics').warning('First delivery_ms=%d turn=%s',int((time.monotonic()-self._turn_started)*1000),self.capability.turn_id if self.capability else 'revoked')
             return result
 
-    async def send_document(self,artifact_id,caption,call_id):
+    async def send_document(self,artifact_id,caption,call_id,*,final=True):
         cap=self.require(visible=True)
         if self.artifacts is None:raise RuntimeError('Durable artifact storage is not configured')
         if len(caption)>1024:raise ValueError('Document captions allow at most 1024 characters')
@@ -263,7 +267,7 @@ class ToolBroker:
         kwargs={'chat_id':self.store.scope.chat_id,'document':InputFile(body,filename=row['filename']),'caption':caption}
         if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
         async def send():return await self.bot.send_document(**kwargs)
-        return await self.deliver(cap,'send_document',{'artifact_id':artifact_id,'filename':row['filename'],'caption':caption},call_id,send)
+        return await self.deliver(cap,'send_document',{'artifact_id':artifact_id,'filename':row['filename'],'caption':caption},call_id,send,final=final)
 
     @guarded_write
     async def create_presentation(self,title,slides,filename,operation_id):
