@@ -227,3 +227,89 @@ Next work, in priority order:
 - PERSONA.original.md / PERSONA.md: archives/design copies. Actual prompt inputs are under repository `prompts/`.
 
 These historical documents are supplementary; the development handoff is contained here. For conflicts, current explicit user decisions and actual code/runtime evidence take precedence over historical plans. Record uncertainties instead of resolving them through invented claims.
+
+## Memory evolution implementation plan — 2026-11-07
+
+Status: researched and planned, NOT implemented. This section is the current work order for the next development agent and this session. Preserve the earlier reliability backlog; memory work does not resolve input lifecycle/failure-outbox defects. Baseline reviewed: `b162cb2`. Only documentation changes belong to this planning task.
+
+### Evidence and design interpretation
+
+Read [Anthropic's components of agent memory](https://www.anthropic.com/research/components-of-agent-memory) and its [dreaming cookbook](https://platform.claude.com/cookbook/managed-agents-cma-dreaming-with-a-dynamic-workflow). Their useful design ideas are searchable originals, revisable notes, optional linked representations, a small injected index, and background correction against evidence. Their experiments are not proof of improvements for Brodar or documentation of the complete claude.ai implementation. Apply the ideas through our existing provider-neutral Brain and Neon tools; no Managed Agents or Supermemory dependency is proposed.
+
+User intent: automatic learning from ordinary conversations and feedback, including communication style and useful knowledge, without per-note owner approval. Main persona and host authority stay fixed. Learned writing advice remains contextual and editable. Preserve natural slang, opinions and roasting; do not use this project to rewrite the personality. Distinguish a person's feedback in one situation from a universal group preference. Store tentative interpretations as tentative rather than treating repetition as verification.
+
+### Code findings to address
+
+- `runtime.py:Conversation._reflect` uses the foreground Brain, broker, turn lock and normal session record. `maintain` obtains the default-topic Conversation for an audience. Thus maintenance context enters a conversational session, and maintenance is coupled to its lifecycle. `pause_reflection` already revokes the capability and interrupts: preserve this behavior when moving workers.
+- `maintain` performs indexing and reflection in one sequential loop. Embedding errors sleep for 60 seconds inside that loop, delaying other audiences and reflection. It checks foreground readiness before acquiring the semaphore, but foreground work may arrive afterward. Separate sessions alone will not remove resource contention.
+- `LearningStore.reflection_batch` selects at most 50 changed messages after a timestamp/UUID cursor; threshold is 20 messages or one hour. `_reflect` caps most batches at 30,000 content characters, but accepts an oversized first row. It also lists only 40 recent notes, with previews, rather than loading complete evidence. Tools permit deeper retrieval, but no scheduled sweep guarantees older notes get revisited.
+- `reflection_finish` advances on a completed terminal outcome. There is no durable run manifest describing examined messages, note revisions, outcomes or preemption. Zero note edits can be legitimate; do not force writes to mark progress.
+- `turn_context` and `context_notes` duplicate selection logic: up to 12 notes, 3,000 characters each, 14,000 total, ranked by speaker association/group paths/recency. There is no explicit small index or revision-aware refresh of injected memory in persistent sessions.
+- `LearningStore.index_candidates` fills its batch with oldest messages before considering notes. A chat backlog can starve new memory embeddings. `RuntimeStore.messages_for_index` is a second candidate selector with different eligibility; inventory callers before consolidating.
+- `ToolBroker.search` awaits query embedding without the foreground preparation recall timeout. Search tools need their own bounded semantic wait and lexical fallback.
+- `memory_write` validates source UUIDs within the audience, uses revision checks and clears stale vectors. Sources are optional; associations accumulate as a conservative union. Revisions store confidence/subjects, but not an exact per-revision source snapshot. Do not claim precise provenance recovery from current history.
+- `memory_write` clears `needs_review` on any successful rewrite. For evidence-backed repairs, record which changed sources were actually checked; a rewrite alone is not evidence of correction.
+
+### Implementation order and acceptance criteria
+
+#### 1. Establish measurements and bound retrieval work
+
+Files: `runtime.py`, `broker.py`, `learning.py`, `runtime_store.py`, `settings.py`, existing runtime/storage tests.
+
+Record queue wait, preparation, provider first event, first successful delivery, recall duration, maintenance duration/preemption and index backlog by kind. Record counts/bytes and correlation IDs, never message bodies or credentials. Ensure metrics are observable at deployed log levels. Separate embedding backoff from the whole maintenance loop. Give messages and notes fair indexing quotas with bounded work per audience; reuse one candidate implementation. Bound tool-query embedding waits and fall back to lexical search on timeout. Retain cancellation propagation.
+
+Acceptance: a blocked embedding service does not block lexical tool search or another audience's maintenance; a persistent message backlog does not starve notes; timings distinguish model time from preparation. Establish a baseline before claiming a speedup.
+
+#### 2. Isolate background learning execution
+
+Files: extract a small provider-construction helper from `Conversation.start`; introduce `brodar/reflection.py`; update `runtime.py`, `broker.py`, `mcp.py`, `settings.py` as needed.
+
+Use one lazy maintenance worker at a time globally on the phone, keyed to an audience for each run. It owns a separate Brain session, cwd, broker, MCP endpoint and capability. Share the existing provider auth home, never copied tokens. Reuse both provider adapters. Initially use fresh maintenance threads per run and close the worker afterward: no sessions-table migration or fake topic IDs required. This trades startup overhead for simple restart/cross-audience isolation; measure before adding pooling. Durable progress lives in Neon.
+
+Move reflection orchestration out of Conversation. Foreground arrivals signal preemption; revoke write capability before interrupting. Bound interrupt/close waits and own every task through shutdown. Avoid awaiting lengthy teardown in polling. Retain total provider concurrency limits, including maintenance, and foreground priority. The maintenance endpoint exposes history/memory tools only; no Telegram delivery, moderation, reminders or artifact side effects. Existing host checks remain defense in depth.
+
+Acceptance: both providers receive isolated maintenance instructions/context; late tools after cancellation fail; foreground events are not lost or delayed by unbounded cleanup; restart does not resume a maintenance session as chat; no background Telegram actions succeed. Use fake Brain/provider tests before any live run.
+
+#### 3. Make maintenance progress durable and inspectable
+
+Files: `learning.py`, `reflection.py`, `brodar/migrations/007_*.sql` (use next free number), recovery/backup code where explicit table inventories require updates.
+
+Add an audience-scoped maintenance run record: kind (incremental/consolidation), status, owner/fencing identity, input boundary, started/completed times, examined source IDs or bounded manifest, changed document revisions, bounded outcome/error, and retry state. Apply RLS/grants consistently. Reuse consumer fencing and permit only one maintenance run per audience; do not invent a second unfenced ownership mechanism.
+
+Advance incremental cursor only after successful processing of the exact supplied window and durable run completion, in one transaction. Cancellation/failure keeps unfinished inputs eligible. Note writes may already have committed: retries read current revisions and avoid duplicate notes. An explicit successful no-change result is valid. Represent an oversized transcript with bounded chunks or continuation offsets; never advance past omitted text. Account for edits that arrive during a run. Add retention for run metadata.
+
+Acceptance: crash before/after note writes, edits during processing and lease loss neither silently skip input nor overwrite newer progress. Exercise real transactions on a disposable migrated DB, not only mocked SQL. Backup/restore includes any new required state.
+
+#### 4. Consolidate older knowledge and improve provenance
+
+Files: `reflection.py`, `learning.py`, `store.py`, `mcp.py`, `broker.py`, migrations as required.
+
+Keep incremental learning for new events. Add a separately scheduled, bounded consolidation pass selecting notes needing review first, then stale/contradictory or repeatedly used notes. Maintain a fair cursor so old notes are eventually visited. Start with a configurable quiet-period cadence and per-run time/tool/byte budget; initial values are tuning hypotheses. Do not scan all transcripts on every pass.
+
+Expose source references with note reads and provide bounded retrieval of cited original messages. Add per-revision source snapshots for future revisions while preserving conservative forgetting associations. Unknown old provenance remains unknown. When merging notes, propagate their source dependencies so forgetting cannot leave derived summaries intact. If introducing explicit note-to-note links, track dependency invalidation and cycle-safe deletion traversal; otherwise flatten source UUIDs into derived notes. Inspect `forgetting.py` and edit invalidation paths before rollout.
+
+The model may create, update, merge and retire arbitrary useful context notes. Give guidance to check claims, distinguish quotations/opinions/guesses, preserve dates and correct outdated information. Avoid rigid allowed-topic lists or a compulsory approval queue. Repairs record checked evidence; unexplained rewrites must not automatically mark invalidated claims verified.
+
+Acceptance: later corrections supersede old claims; jokes do not become certain biographies in evaluation cases; unrelated groups/DMs remain inaccessible; source deletion invalidates all derived layers; concurrent foreground memory writes produce revision conflicts followed by rereads, never silent overwrites.
+
+#### 5. Add a compact index and selective context loading
+
+Files: `learning.py`, `prompts.py`, `store.py`, `reflection.py`, foreground context construction.
+
+Use an ordinary virtual document such as `context/overview.md` as the learned index. It links to useful people/topic/method/style notes in the same audience and contains concise descriptions. Keep ordinary note creation unrestricted. Apply a configurable small injection budget to the index and relevant excerpts; retain full documents and transcript search for tools. Unify the two context-selection paths.
+
+Record injected revisions per provider session. Send changes/corrections when needed without repeating every note on every turn. Fresh/resumed threads and compaction must recover the necessary index; verify provider events before relying on compaction notifications. If reliable tracking is unavailable, use bounded reinjection rather than silently dropping context. Deletion cannot erase an already supplied provider context: invalidate affected sessions when required, following existing forgetting semantics.
+
+Acceptance: relevant older notes remain discoverable despite recency; broken/retired links are repaired; token/byte budgets hold; a fresh session can answer using old evidence; edits and forgetting do not leave stale injected advice authoritative. Do not lower compaction thresholds as a substitute for this work.
+
+#### 6. Evaluate and roll out incrementally
+
+Add synthetic, repository-safe cases for recall, cross-message synthesis, correction, preference scope, multilingual tone, callbacks, forgetting and malicious instructions in stored text. Compare current behavior, search-only retrieval and the proposed index/consolidation path. Score evidence correctness, unsupported assertions, tone feedback fit, retrieval/first-delivery latency and maintenance cost separately. Do not assume gains observed in Anthropic's models transfer to gpt-6-luna.
+
+Run deterministic lifecycle/capability tests and disposable-database migration/restart tests first. Live provider evaluation consumes resources and must use an explicitly selected dataset; private chats stay out of Git. Deploy scheduling isolation and bounded search before enabling consolidation/index changes. Use feature switches for new maintenance modes, not an automatic provider fallback. Rollback disables the new modes and leaves additive schema/history intact. Keep ordinary foreground learning available.
+
+Definition of done: code and migration review complete; targeted tests pass with skips disclosed; both adapters supported with live parity limitations stated; restart/forgetting paths covered; measured comparison recorded; AGENTS.md updated with actual deployed settings and results. No claim of smarter learning or lower latency from a successful process startup alone.
+
+### Agent execution notes
+
+Work in the numbered order, in reviewable commits on main as requested by the owner. Do not implement all phases as a wholesale rewrite. Start each phase by checking current code and migrations because this plan records a specific baseline. Update this section's status per phase; CLAUDE.md already imports it, so create no additional handoff/plan documents. Existing urgent reliability work may be interleaved before memory rollout. No runtime implementation, production migration, restart or live inference was performed for this planning task.
