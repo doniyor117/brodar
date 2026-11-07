@@ -40,7 +40,7 @@ log=logging.getLogger('brodar')
 
 def undelivered_artifacts(artifacts,receipts):
     delivered={str(row['request'].get('artifact_id')) for row in receipts
-               if row['status']=='sent' and row['method']=='send_document'}
+               if row['status']=='sent' and row['method'] in {'send_document','routed_document'}}
     return [str(row['artifact_id']) for row in artifacts if str(row['artifact_id']) not in delivered]
 
 
@@ -69,6 +69,7 @@ class Conversation:
                                delivery_guard=delivery_guard,owner_ids=getattr(cfg,'owner_ids',()))
         self.broker.recall_timeout=getattr(cfg,'recall_timeout_seconds',2.0)
         self.mcp=ScopedMcpServer(self.broker)
+        self.shared_group=None
         self.brain=None
         self.revision=None
         self.wake=asyncio.Event()
@@ -80,6 +81,8 @@ class Conversation:
         self._accept_steer=False
         self._signal_task=None
         self._presence_generation=None
+        self._ambient_first=None
+        self._ambient_last=None
         self._last_ambient=0
         self._cancelled=False
         self._turn_id=None
@@ -88,7 +91,14 @@ class Conversation:
         from .commands import CommandGateway
         self.broker.commands=CommandGateway(cfg.runtime_dir/'workspaces'/key)
 
-    async def start(self, *, maintenance=False):
+    async def start(self, *, maintenance=False,resource=False):
+        if self.shared_group is not None and not maintenance and not resource:
+            self.brain=await self.shared_group.bind(self)
+            self.revision=self.shared_group.resource.revision
+            self._saved_session=self.brain.session_id
+            self.task=asyncio.create_task(self.loop(),name='brodar-group-room')
+            self.wake.set()
+            return
         if maintenance:
             from .mcp import build_tools
             self.root=self.root/'maintenance'
@@ -127,14 +137,18 @@ class Conversation:
             await self.brain.close()
             await self.mcp.close()
             raise
-        if maintenance:return
+        if maintenance or resource:return
         self.task=asyncio.create_task(self.loop(),name='brodar-conversation')
         self.wake.set()
 
     async def signal(self,*,direct=False):
         self.wake.set()
+        if not direct:
+            now=time.monotonic()
+            if self._ambient_first is None:self._ambient_first=now
+            self._ambient_last=now
         if direct:self.direct.set()
-        if self._signal_task is None or self._signal_task.done():
+        if direct and (self._signal_task is None or self._signal_task.done()):
             self._signal_task=asyncio.create_task(self._steer_pending(),name='brodar-steer')
             self._signal_task.add_done_callback(self._signal_done)
 
@@ -190,6 +204,13 @@ class Conversation:
                 delay=max(delay,self.cfg.ambient_interval-(time.monotonic()-self._last_ambient))
             if delay>0:
                 try:await asyncio.wait_for(self.direct.wait(),timeout=delay)
+                except asyncio.TimeoutError:pass
+            while self._ambient_first is not None and not self.direct.is_set():
+                now=time.monotonic()
+                due=min(self._ambient_first+getattr(self.cfg,'ambient_max_wait',60),self._ambient_last+getattr(self.cfg,'ambient_quiet_seconds',8))
+                due=max(due,self._last_ambient+self.cfg.ambient_interval)
+                if due<=now:break
+                try:await asyncio.wait_for(self.direct.wait(),due-now)
                 except asyncio.TimeoutError:pass
             self.direct.clear()
             queued=time.monotonic()
@@ -282,16 +303,22 @@ class Conversation:
         prep_started=time.monotonic()
         batch=await self.store.claim_inputs()
         if not batch:return
+        self._ambient_first=None;self._ambient_last=None
         self.inflight=list(batch)
         self._cancelled=False
         self._turn_id=str(batch[0]['id'])
         payload_message=batch[0]['payload'].get('message') or batch[0]['payload'].get('edited_message') or {}
-        requester=(payload_message.get('from') or {}).get('id') if not payload_message.get('sender_chat') else None
+        sender_meta=payload_message.get('from') or {}
+        from .routing import peer_key
+        peer=await self.broker.loop_guard.resolve(sender_meta,getattr(self.cfg,'research_bot_username','hyperresearcher_bot')) if sender_meta.get('is_bot') and self.broker.loop_guard else None
+        if peer and self.broker.loop_guard and not await self.broker.loop_guard.available(peer):
+            await self.store.finish_inputs([r['id'] for r in batch],error='bot_loop_limit');return
+        requester=sender_meta.get('id') if not payload_message.get('sender_chat') and not peer else None
         work=await self.store.work_begin(self._turn_id,requester,[str(r['message_id']) for r in batch])
         if work['status'] in {'done','cancelled'}:
             await self.store.finish_inputs([r['id'] for r in batch],error='cancelled' if work['status']=='cancelled' else None)
             return
-        self.broker.begin(TurnCapability(self._turn_id,requester_id=requester),moderation_requests=moderation_requests(batch,getattr(self.bot,'username',None)),
+        self.broker.begin(TurnCapability(self._turn_id,requester_id=requester,peer_bot_id=peer),moderation_requests=moderation_requests(batch,getattr(self.bot,'username',None)),
                           requests=input_requests(batch))
         await self.materialize(batch)
         if self._cancelled:
@@ -335,7 +362,7 @@ class Conversation:
                 outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),timeout=600)
                 log.warning('Foreground provider turn seconds=%.2f continuation=%s status=%s',time.monotonic()-provider_started,continuation,outcome.status)
                 async with self._steer_lock:self._accept_steer=False
-                if self.brain.session_id and self.brain.session_id!=self._saved_session:
+                if self.brain.session_id and self.brain.session_id!=self._saved_session and not getattr(self.brain,'shared',False):
                     await self.store.session_put(self.cfg.brain,self.revision,self.brain.session_id)
                     self._saved_session=self.brain.session_id
                 state=await self.store.work_state(turn_id)
@@ -361,6 +388,7 @@ class Conversation:
             await self.store.finish_inputs([r['id'] for r in self.inflight],
                 error=None if done else ('cancelled' if interrupted else ((outcome.error or 'turn_incomplete') if outcome else 'turn_failed')),
                 retry=retry,job_id=turn_id)
+            if peer and done and outcome.action=='skip' and self.broker.loop_guard:await self.broker.loop_guard.close(peer)
             if retry:self.wake.set()
             if outcome and outcome.status=='failed' and not interrupted:
                 await self.brain.close()
@@ -404,7 +432,10 @@ async def run(cfg):
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:raise RuntimeError('A Brodar process is already using this runtime directory') from None
     db=Postgres(cfg.database_url)
-    room_dbs=[]
+    coordination_db=Postgres(cfg.database_url)
+    routing_db=Postgres(cfg.database_url)
+    approval_db=Postgres(cfg.database_url)
+    room_dbs=[coordination_db,routing_db,approval_db]
     learning_db=Postgres(cfg.database_url)
     jobs_db=Postgres(cfg.database_url)
     embeddings=GeminiEmbeddings(cfg.google_key) if cfg.google_key else None
@@ -412,9 +443,11 @@ async def run(cfg):
     presence=TypingPresence(bot)
     objects=ObjectStore.from_file(cfg.storage_config)
     from .approvals import Approvals
-    approval_service=Approvals(db,bot,cfg)
+    approval_service=Approvals(approval_db,bot,cfg)
     from .access import ChatAccess
     access=ChatAccess(cfg,db)
+    from .coordination import LoopGuard
+    loop_guard=LoopGuard(coordination_db,cfg.instance_id)
     approval_service.allowed_chats=access.audiences
     conversations={}
     creating={}
@@ -422,6 +455,23 @@ async def run(cfg):
     dispatch_flags={}
     semaphore=asyncio.Semaphore(cfg.max_concurrent_turns)
     lease=None
+
+    from .shared import GroupSession,SharedScope,BrokerProxy
+    from .routing import GroupRouter,peer_key
+    router=GroupRouter(cfg,access,bot,routing_db,objects,lambda:lease)
+    router.loop_guard=loop_guard
+    async def shared_factory(first):
+        session_db=Postgres(cfg.database_url);room_dbs.append(session_db)
+        scope=SharedScope(first.store.scope.bot_id,0,instance_id=cfg.instance_id)
+        def register():
+            with session_db.transaction(scope.audience) as cursor:
+                cursor.execute('INSERT INTO brodar_v2.audience_registry(audience,instance_id,chat_id) VALUES (%s,%s,0) ON CONFLICT DO NOTHING',(scope.audience,cfg.instance_id))
+        await session_db.run(register)
+        resource=Conversation(cfg,LearningStore(session_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,objects)
+        resource.broker=BrokerProxy(first.broker)
+        resource.mcp=ScopedMcpServer(resource.broker)
+        return resource
+    shared_groups=GroupSession(shared_factory)
 
     async def get_conversation(scope):
         key=scope.conversation
@@ -434,7 +484,10 @@ async def run(cfg):
                 audit_db=Postgres(cfg.database_url)
                 room_dbs.append(audit_db)
                 conversation.broker.audit_store=LearningStore(audit_db,scope,lease_owner=lease.owner)
+                conversation.shared_group=shared_groups if scope.chat_id<0 else None
                 conversation.broker.approvals=approval_service
+                conversation.broker.router=router
+                conversation.broker.loop_guard=loop_guard
                 await conversation.start()
                 conversations[key]=conversation
                 return conversation
@@ -504,6 +557,7 @@ async def run(cfg):
         info=await bot.get_webhook_info()
         if info.url:raise RuntimeError('This bot has a webhook; use a separate test token or explicitly remove the webhook first')
         await access.load()
+        await loop_guard.register()
         lease=ConsumerLease(db,me.id)
         await lease.acquire()
         parent_task=asyncio.current_task()
@@ -602,8 +656,12 @@ async def run(cfg):
                             await conversation.cancel(sender.id)
                             await store.finish_inputs([iid])
                         elif sender and sender.is_bot:
-                            await store.finish_inputs([iid])  # context retained; no bot-to-bot reply loop
+                            if sender.id!=me.id and direct and text.strip().upper() not in {'[SILENT]','SILENT'} and await loop_guard.incoming(await loop_guard.resolve(raw_message.get('from') or {},cfg.research_bot_username),scope.chat_id,text):
+                                dispatch(scope,False)
+                            else:await store.finish_inputs([iid])
+
                         else:
+                            if direct:await loop_guard.human(scope.chat_id)
                             dispatch(scope,direct)
                 elif message is not None:
                     if not ordinary_message(raw_message):log.warning('Recipient-scoped Telegram input omitted from ordinary chat history')
@@ -632,6 +690,7 @@ async def run(cfg):
         for pending_dispatch in dispatch_tasks.values():pending_dispatch.cancel()
         await asyncio.gather(*list(dispatch_tasks.values()),return_exceptions=True)
         await asyncio.gather(*(c.close() for c in conversations.values()),return_exceptions=True)
+        await shared_groups.close()
         await presence.close()
         await bot.shutdown()
         if embeddings:await embeddings.close()

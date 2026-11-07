@@ -320,3 +320,35 @@ async def test_group_admission_persists_across_policy_restart(stores):
                 c.execute('DELETE FROM brodar_v2.group_access WHERE audience=%s',(access.audience,))
                 c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(access.audience,))
         await a.db.run(cleanup)
+
+@pytest.mark.asyncio
+async def test_global_peer_budget_survives_restart_and_group_change(stores):
+    from brodar.coordination import LoopGuard
+    a,b=stores
+    guard=LoopGuard(a.db,a.scope.instance_id)
+    await guard.register()
+    try:
+        original=await guard.resolve({'id':123,'username':'hyperresearcher_bot'},'hyperresearcher_bot')
+        renamed=await LoopGuard(a.db,a.scope.instance_id).resolve({'id':123,'username':'renamed_bot'},'hyperresearcher_bot')
+        assert original==renamed
+        assert await guard.incoming(99,-11,'first bot question')
+        for i in range(10):await guard.reserve(99,-11,'operation-'+str(i))
+        await guard.reserve(99,-22,'operation-0')  # idempotent replay doesn't buy another send
+        restored=LoopGuard(a.db,a.scope.instance_id)
+        await restored.register()
+        assert not await restored.available(99)
+        assert not await restored.incoming(99,-22,'try a different group')
+        with pytest.raises(PermissionError):await restored.reserve(99,-22,'eleventh')
+        await restored.human(-22)
+        assert not await restored.available(99)
+        await restored.human(-11)
+        assert await restored.available(99)
+        await restored.close(99)
+        assert not await restored.available(99)
+    finally:
+        def clean():
+            with a.db.transaction(guard.audience) as c:
+                for table in ['bot_reservations','bot_exchanges','bot_aliases','research_tasks']:
+                    c.execute(f'DELETE FROM brodar_v2.{table} WHERE audience=%s',(guard.audience,))
+                c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(guard.audience,))
+        await a.db.run(clean)

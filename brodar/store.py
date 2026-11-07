@@ -102,14 +102,14 @@ class ScopedStore:
                              json.dumps({'delivered_as_reply_context':True,'with_update_id':update_id}),self.scope.audience,str(parent_id)))
                 c.execute('INSERT INTO brodar_v2.messages '
                           '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,'
-                          'sent_at,reply_to_id,edited_at,source_id,source_hash) '
-                          'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                          'sent_at,reply_to_id,edited_at,source_id,source_hash,metadata) '
+                          'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) '
                           'ON CONFLICT(audience,source,source_id) DO UPDATE SET '
-                          'content=excluded.content,edited_at=excluded.edited_at,source_hash=excluded.source_hash,changed_at=now() '
+                          'content=excluded.content,edited_at=excluded.edited_at,source_hash=excluded.source_hash,metadata=excluded.metadata,changed_at=now() '
                           'WHERE excluded.edited_at IS NOT NULL AND '
                           '(messages.edited_at IS NULL OR excluded.edited_at > messages.edited_at) RETURNING id',
                           (mid,self.scope.audience,self.scope.topic_id,message_id,sender_id,sender_name,
-                           role,text,timestamp,reply_to_id,edited_at,str(message_id),digest(text)))
+                           role,text,timestamp,reply_to_id,edited_at,str(message_id),digest(text),json.dumps({'sender_is_bot':bool(((payload.get('message') or payload.get('edited_message') or {}).get('from') or {}).get('is_bot')),'sender_username':((payload.get('message') or payload.get('edited_message') or {}).get('from') or {}).get('username')})))
                 changed=c.fetchone() is not None
                 c.execute('INSERT INTO brodar_v2.inbox(id,audience,topic_id,bot_id,update_id,message_id,payload) '
                           'VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT(bot_id,update_id) DO NOTHING RETURNING id',

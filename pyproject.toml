@@ -72,6 +72,8 @@ packages = ["hamroh", "brodar"]
 "prompts/repair-missing-files.md" = "brodar/assets/repair-missing-files.md"
 "prompts/repair-no-delivery.md" = "brodar/assets/repair-no-delivery.md"
 "prompts/runtime.md" = "brodar/assets/runtime.md"
+"prompts/shared-group-turn.md" = "brodar/assets/shared-group-turn.md"
+"prompts/research-delegation.md" = "brodar/assets/research-delegation.md"
 "prompts/tool-authorization.md" = "brodar/assets/tool-authorization.md"
 "prompts/tool-descriptions.md" = "brodar/assets/tool-descriptions.md"
 

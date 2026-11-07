@@ -13,7 +13,7 @@ def compose(*,model:str,provider:str,tools:list[str],timezone:str='UTC'):
     revision=hashlib.sha256('\0'.join(load(name) for name in (
         'brodar.md','brodar-harness.md','runtime.md','codex-developer.md',
         'tool-descriptions.md','tool-authorization.md','control-action.md','control-reason.md',
-        'claude-runtime.md','claude-tools.md','claude-external-tools.md')).encode()).hexdigest()
+        'claude-runtime.md','claude-tools.md','claude-external-tools.md','shared-group-turn.md','research-delegation.md')).encode()).hexdigest()
     runtime=render('runtime.md',model=model,provider=provider,timezone=timezone,tools='\n'.join('- '+name for name in tools))
     return fixed+'\n\n'+runtime,revision
 
@@ -25,6 +25,7 @@ def envelope(messages,*,context=None,notes=None,receipts=None):
         from xml.sax.saxutils import quoteattr
         meta={k:m.get(k) for k in ['id','platform_message_id','sender_id','sender_name','role','sent_at',
                                    'legacy_timestamp','reply_to_id','topic_id','source','chunk_start','chunk_end','content_length'] if m.get(k) is not None}
+        if m.get('metadata'):meta.update({k:v for k,v in m['metadata'].items() if k in {'sender_is_bot','sender_username'}})
         return '<message metadata='+quoteattr(json.dumps(meta,default=str,ensure_ascii=False))+'>'+escape(m.get('content',''))+'</message>'
     blocks=[]
     if context:

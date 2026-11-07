@@ -13,6 +13,7 @@ class InputRequest:
     id:str
     actor:int
     text:str
+    reply_to:int|None=None
 
 
 def input_requests(batch):
@@ -22,7 +23,7 @@ def input_requests(batch):
         sender=message.get('from') or {}
         if (not sender.get('id') or sender.get('is_bot') or message.get('sender_chat') or
                 message.get('forward_origin') or message.get('forward_from')):continue
-        result.append(InputRequest(str(row['message_id']),sender['id'],message.get('text') or message.get('caption') or ''))
+        result.append(InputRequest(str(row['message_id']),sender['id'],message.get('text') or message.get('caption') or '',(message.get('reply_to_message') or {}).get('message_id')))
     return result
 
 

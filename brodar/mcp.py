@@ -41,8 +41,8 @@ class AuditedMcp(FastMCP):
     def start_audit(self):
         async def consume():
             while True:
-                record=await self.audit_queue.get()
-                try:await getattr(self.broker,'audit_store',self.broker.store).audit_tool(**record)
+                target,record=await self.audit_queue.get()
+                try:await target.audit_tool(**record)
                 except Exception as exc:logging.getLogger('brodar.audit').error('Tool audit deferred/lost: %s',type(exc).__name__)
                 finally:self.audit_queue.task_done()
         self.audit_worker=asyncio.create_task(consume(),name='brodar-audit')
@@ -93,7 +93,7 @@ class AuditedMcp(FastMCP):
                     record=dict(turn_id=cap.turn_id if cap else None,name=fn.__name__,
                         arguments=scrub_object(arguments),result=scrub_object(output),error=error,duration_ms=int((time.monotonic()-start)*1000))
                     if self.audit_worker:
-                        await self.audit_queue.put(record)  # bounded backpressure, no unowned task per call
+                        await self.audit_queue.put((getattr(self.broker,'audit_store',self.broker.store),record))  # bounded backpressure, no unowned task per call
                     else:await self.broker.store.audit_tool(**record)
                 except Exception as exc:
                     logging.getLogger('brodar.audit').error('Tool audit unavailable: %s',type(exc).__name__)
@@ -209,6 +209,52 @@ def build_tools(broker):
         action,needed=broker.commands.classify(argv)
         if not needed:return result({'approval_required':False})
         return result(await broker.approvals.request_action(broker.store.scope,cap.turn_id,action,reason))
+
+    @mcp.tool()
+    async def group_routes()->str:
+        broker.require()
+        return result(await broker.router.rooms())
+
+    @mcp.tool()
+    async def group_send(chat_id:int,text:str,operation_id:str,topic_id:int=0,reply_to_message_id:int|None=None)->str:
+        return result(await broker.router.send(broker,chat_id,text,operation_id,topic_id,reply_to_message_id))
+
+    @mcp.tool()
+    async def group_send_document(chat_id:int,artifact_id:str,operation_id:str,caption:str='',topic_id:int=0)->str:
+        return result(await broker.router.send_document(broker,chat_id,artifact_id,operation_id,caption,topic_id))
+
+    @mcp.tool()
+    async def group_history_search(chat_id:int,query:str,limit:int=10)->str:
+        broker.require()
+        vector=None
+        if broker.embeddings:
+            from .embeddings import EmbeddingError
+            try:vector=await asyncio.wait_for(broker.embeddings.embed(query,query=True),2)
+            except (EmbeddingError,ValueError,asyncio.TimeoutError):pass
+        return result(await broker.router.search(chat_id,query,vector,limit))
+
+    @mcp.tool()
+    async def delegate_research(brief:str,operation_id:str)->str:
+        return result(await broker.router.delegate(broker,brief,operation_id))
+
+    @mcp.tool()
+    async def research_return(task_id:str,report:str,operation_id:str)->str:
+        return result(await broker.router.return_result(broker,task_id,report,operation_id))
+
+    @mcp.tool()
+    async def research_tasks()->str:
+        broker.require()
+        return result(await broker.router.tasks())
+
+    @mcp.tool()
+    async def telegram_group_info(kind:str='chat',user_id:int|None=None,offset:int=0,limit:int=50)->str:
+        from .group_admin import info
+        return result(await info(broker,kind,user_id,offset,limit))
+
+    @mcp.tool()
+    async def telegram_admin_action(request_message_id:str,action:str,parameters:dict,operation_id:str)->str:
+        from .group_admin import perform
+        return result(await perform(broker,request_message_id,action,parameters,operation_id))
 
     @mcp.tool()
     async def skills_list(query:str='',offset:int=0,limit:int=30)->str:

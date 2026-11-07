@@ -41,6 +41,11 @@ async def forget_messages(db,audience,message_ids):
             # Keep no model-readable copies there after explicit source deletion.
             c.execute('DELETE FROM brodar_v2.tool_calls WHERE audience=%s',(audience,))
             c.execute('DELETE FROM brodar_v2.sessions WHERE audience=%s',(audience,))
+            if audience.startswith('telegram:'):
+                shared='shared:'+audience.split(':',2)[1]
+                c.execute("SELECT set_config('brodar.audience',%s,true)",(shared,))
+                c.execute('DELETE FROM brodar_v2.sessions WHERE audience=%s',(shared,))
+                c.execute("SELECT set_config('brodar.audience',%s,true)",(audience,))
             return {'forgotten_messages':len(rows),'retired_source_linked_notes':len(docs),'provider_sessions_invalidated':True,
                     'limits':'Separate quoted messages, artifacts, legacy public source archives, old backups and provider retention are not erased by this command.'}
     return await db.run(op)

@@ -21,6 +21,7 @@ class TurnCapability:
     mode: str = 'conversation'
     requester_id: int | None = None
     request_message_id: int | None = None
+    peer_bot_id:int|None=None
     token:str=field(default_factory=lambda:secrets.token_urlsafe(24),repr=False)
 
 
@@ -29,6 +30,7 @@ class ToolBroker:
         self.store,self.bot,self.embeddings=store,bot,embeddings
         self.artifacts=artifacts
         self.approvals=None
+        self.loop_guard=None
         self.delivery_guard=delivery_guard
         self.owner_ids=owner_ids
         self.capability=None
@@ -164,6 +166,7 @@ class ToolBroker:
         cap=self.require(visible=True)
         from .redaction import scrub
         text=scrub(text)
+        if text.strip().upper()=='[SILENT]':raise ValueError('Use the internal skip outcome; never send a silence token to Telegram')
         if not text.strip() or len(text)>4096:raise ValueError('Use 1..4096 characters')
         await self.message_target(message_id,own=True)
         async def send():return await self.bot.edit_message_text(chat_id=self.store.scope.chat_id,message_id=message_id,text=text)
@@ -171,6 +174,9 @@ class ToolBroker:
 
     async def send_message(self,text:str,*,call_id:str,reply_to_message_id:int|None=None):
         cap=self.require(visible=True)
+        from .redaction import scrub
+        text=scrub(text)
+        if text.strip().upper()=='[SILENT]':raise ValueError('Use the internal skip outcome; never send a silence token to Telegram')
         if not text.strip() or len(text)>4096:
             raise ValueError('Send 1 to 4096 characters per message')
         if reply_to_message_id is not None:
@@ -183,6 +189,14 @@ class ToolBroker:
                               (self.store.scope.audience,self.store.scope.topic_id,reply_to_message_id))
                     if c.fetchone() is None:raise ValueError('Reply target is not in this conversation')
             await self.store.db.run(validate_reply)
+        if self.loop_guard:
+            import re
+            from .routing import peer_key
+            for username in set(re.findall(r'@([A-Za-z0-9_]*bot)\b',text,re.I)):
+                if username.lower()==(getattr(self.bot,'username','') or '').lower():continue
+                recipient=peer_key({'username':username},username)
+                if recipient!=cap.peer_bot_id:
+                    await self.loop_guard.reserve(recipient,self.store.scope.chat_id,f'mention-peer:{recipient}:{cap.turn_id}:{call_id}:{self.store.scope.chat_id}')
         kwargs={'chat_id':self.store.scope.chat_id,'text':text}
         if self.store.scope.topic_id:kwargs['message_thread_id']=self.store.scope.topic_id
         if reply_to_message_id is not None:kwargs['reply_to_message_id']=reply_to_message_id
@@ -193,6 +207,8 @@ class ToolBroker:
         if not call_id or len(call_id)>200:raise ValueError('Use an operation ID of 1 to 200 characters')
         async with self._delivery_lock:
             if self.capability is not cap:raise PermissionError('Turn was cancelled')
+            if self.loop_guard and cap.peer_bot_id:
+                await self.loop_guard.reserve(cap.peer_bot_id,self.store.scope.chat_id,f'{cap.turn_id}:{call_id}:{method}:{self.store.scope.chat_id}')
             receipt=await self.store.delivery_begin(cap.turn_id,call_id,method,request)
             if self.capability is not cap:
                 if receipt['status']=='pending':
