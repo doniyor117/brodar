@@ -50,7 +50,7 @@ def child_environment(home: Path, extra: dict[str,str] | None = None):
 class CodexBrain:
     def __init__(self, *, home: Path, cwd: Path, model: str, effort: str,
                  instructions: str, binary: str = 'codex', env: dict[str,str] | None = None,
-                 mcp_url:str|None=None,transport_factory=RpcProcess):
+                 mcp_url:str|None=None,auto_compact_token_limit:int|None=None,transport_factory=RpcProcess):
         self.home,self.cwd = home,cwd
         self.model,self.effort,self.instructions = model,effort,instructions
         self.session_id = None
@@ -61,6 +61,8 @@ class CodexBrain:
         self._waiter = None
         self._transport_closed = False
         argv=app_server_argv(binary)
+        if auto_compact_token_limit is not None:
+            argv.extend(['-c',f'model_auto_compact_token_limit={auto_compact_token_limit}'])
         if mcp_url:
             import json
             argv.extend(['-c','mcp_servers.hamroh.url='+json.dumps(mcp_url),

@@ -78,7 +78,8 @@ class LearningStore(RuntimeStore):
         path=context_path(path)
         def op():
             with self.db.transaction(self.scope.audience,readonly=True) as c:
-                c.execute('SELECT d.id,d.revision AS current_revision,d.deleted,r.revision,r.content,r.reason,r.created_at '
+                c.execute('SELECT d.id,d.revision AS current_revision,d.deleted,d.subject_ids AS current_subject_ids,'
+                    'd.confidence AS current_confidence,r.revision,r.content,r.reason,r.created_at,r.metadata '
                     'FROM brodar_v2.memory_documents d JOIN brodar_v2.memory_revisions r ON r.document_id=d.id '
                     'WHERE d.audience=%s AND d.path=%s ORDER BY r.revision DESC LIMIT %s',
                     (self.scope.audience,path,max(1,min(limit,20))))
@@ -89,7 +90,11 @@ class LearningStore(RuntimeStore):
         rows=await self.memory_history(path,20)
         old=next((r for r in rows if r['revision']==revision),None)
         if not old or not old['content']:raise ValueError('Requested revision unavailable or forgotten')
-        return await self.memory_write(path,old['content'],expected_revision=expected_revision,reason=reason)
+        # Pre-migration revisions have unknown metadata; preserve current values rather
+        # than invent historical certainty. Existing source links remain conservative.
+        metadata=old['metadata'] or {'subject_ids':old['current_subject_ids'],'confidence':old['current_confidence']}
+        return await self.memory_write(path,old['content'],expected_revision=expected_revision,reason=reason,
+                                       subject_ids=metadata['subject_ids'],confidence=metadata['confidence'])
 
     async def memory_forget(self,path,*,expected_revision):
         path=context_path(path)

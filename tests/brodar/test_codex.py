@@ -118,3 +118,10 @@ async def test_timeout_cancellation_interrupts_before_turn_id_is_cleared(tmp_pat
     assert ('turn/interrupt',{'threadId':'thread','turnId':'still-running'}) in brain.rpc.requests
     assert brain.active_turn is None
     await brain.close()
+
+
+def test_compaction_override_is_process_local(tmp_path):
+    brain=CodexBrain(home=tmp_path/'home',cwd=tmp_path/'work',model='model',effort='low',
+        instructions='fixed',auto_compact_token_limit=80000)
+    assert 'model_auto_compact_token_limit=80000' in brain.rpc.argv
+    assert not (tmp_path/'home'/'config.toml').exists()

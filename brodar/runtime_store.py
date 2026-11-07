@@ -151,22 +151,49 @@ class RuntimeStore(ScopedStore):
                      scrub(error)[:4000] if error else None,duration_ms))
         await self.db.run(op)
 
-    async def claim_inputs(self,limit=50):
+    async def claim_inputs(self,limit=50,*,count_attempt=True,exclude_ids=()):
         def op():
             with self.db.transaction(self.scope.audience) as c:
                 if self.lease_owner:
                     c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now()',
                               (self.scope.bot_id,self.lease_owner))
                     if c.fetchone() is None:raise PermissionError('Telegram consumer lease is no longer active')
-                c.execute("UPDATE brodar_v2.inbox SET status='running',attempts=attempts+1,"
+                c.execute("UPDATE brodar_v2.inbox SET status='running',attempts=attempts+%s,"
                           "lease_owner=%s,lease_until=now()+interval '15 minutes' WHERE id IN ("
-                          "SELECT id FROM brodar_v2.inbox WHERE audience=%s AND topic_id=%s "
+                          "SELECT id FROM brodar_v2.inbox WHERE audience=%s AND topic_id=%s AND NOT (id=ANY(%s::uuid[])) "
                           "AND (status='pending' OR (status='running' AND (lease_until<now() OR "
                           "(%s::uuid IS NOT NULL AND lease_owner IS DISTINCT FROM %s::uuid)))) "
                           "ORDER BY update_id LIMIT %s FOR UPDATE SKIP LOCKED) RETURNING *",
-                          (self.lease_owner,self.scope.audience,self.scope.topic_id,self.lease_owner,self.lease_owner,max(1,min(limit,100))))
+                          (int(count_attempt),self.lease_owner,self.scope.audience,self.scope.topic_id,
+                           [str(uid) for uid in exclude_ids],self.lease_owner,self.lease_owner,max(1,min(limit,100))))
                 return sorted(records(c),key=lambda r:r['update_id'])
         return await self.db.run(op)
+
+    async def _update_active_inputs(self,ids,*,count_attempt=False):
+        if not ids:return []
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                if self.lease_owner:
+                    c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
+                              (self.scope.bot_id,self.lease_owner))
+                    if c.fetchone() is None:raise PermissionError('Telegram consumer lease is no longer active')
+                c.execute("UPDATE brodar_v2.inbox SET attempts=attempts+%s,lease_until=now()+interval '15 minutes' "
+                          "WHERE audience=%s AND topic_id=%s AND id=ANY(%s::uuid[]) AND status='running' "
+                          "AND lease_owner IS NOT DISTINCT FROM %s::uuid RETURNING *",
+                          (int(count_attempt),self.scope.audience,self.scope.topic_id,[str(uid) for uid in ids],self.lease_owner))
+                rows=records(c)
+                if len(rows)!=len(set(map(str,ids))):
+                    raise PermissionError('Input ownership changed during active work')
+                return sorted(rows,key=lambda row:row['update_id'])
+        return await self.db.run(op)
+
+    async def mark_inputs_attempted(self,ids):
+        """Charge a steering attempt only after the provider accepts its inputs."""
+        return await self._update_active_inputs(ids,count_attempt=True)
+
+    async def renew_inputs(self,ids):
+        """Keep long-running inputs leased, without consuming execution retries."""
+        return len(await self._update_active_inputs(ids))
 
     async def finish_inputs(self,ids,*,error=None,retry=False,job_id=None):
         if not ids:return
@@ -176,12 +203,16 @@ class RuntimeStore(ScopedStore):
                     c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
                               (self.scope.bot_id,self.lease_owner))
                     if c.fetchone() is None:return
-                c.execute('UPDATE brodar_v2.inbox SET status=%s,lease_until=NULL,error_code=%s '
+                c.execute("UPDATE brodar_v2.inbox SET status=CASE WHEN %s AND attempts<3 THEN 'pending' "
+                          "WHEN %s THEN 'failed' ELSE %s END,lease_until=NULL,error_code=%s "
                           'WHERE audience=%s AND id=ANY(%s::uuid[]) AND '
                           '(%s::uuid IS NULL OR lease_owner=%s::uuid OR (status=\'pending\' AND lease_owner IS NULL))',
-                          ('pending' if retry else ('failed' if error else 'done'),error,self.scope.audience,[str(x) for x in ids],self.lease_owner,self.lease_owner))
+                          (retry,retry,'failed' if error else 'done',error,self.scope.audience,[str(x) for x in ids],self.lease_owner,self.lease_owner))
                 if job_id:
-                    status='pending' if retry else ('cancelled' if error in {'cancelled','turn_cancelled_or_timed_out'} else ('failed' if error else 'done'))
+                    c.execute("SELECT 1 FROM brodar_v2.inbox WHERE audience=%s AND id=ANY(%s::uuid[]) AND status='pending' LIMIT 1",
+                              (self.scope.audience,[str(x) for x in ids]))
+                    pending=c.fetchone() is not None
+                    status='pending' if retry and pending else ('failed' if retry else ('cancelled' if error in {'cancelled','turn_cancelled_or_timed_out'} else ('failed' if error else 'done')))
                     c.execute("UPDATE brodar_v2.jobs SET status=%s,updated_at=now() WHERE audience=%s AND id=%s AND kind='work' "
                               "AND payload->>'consumer_owner' IS NOT DISTINCT FROM %s",
                               (status,self.scope.audience,str(job_id),self.lease_owner))

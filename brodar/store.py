@@ -200,8 +200,9 @@ class ScopedStore:
                           'confidence=excluded.confidence,deleted=false,needs_review=false,updated_at=now()',
                           (docid,self.scope.audience,path,content,revision,subject_ids or [],confidence))
                 c.execute('INSERT INTO brodar_v2.memory_revisions '
-                          '(id,audience,document_id,revision,content,deleted,reason) VALUES (%s,%s,%s,%s,%s,false,%s)',
-                          (str(uuid4()),self.scope.audience,docid,revision,content,reason))
+                          '(id,audience,document_id,revision,content,deleted,reason,metadata) VALUES (%s,%s,%s,%s,%s,false,%s,%s::jsonb)',
+                          (str(uuid4()),self.scope.audience,docid,revision,content,reason,
+                           json.dumps({'subject_ids':subject_ids or [],'confidence':confidence})))
                 for src in source_ids:
                     c.execute('INSERT INTO brodar_v2.memory_sources(audience,document_id,message_id) '
                               'VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',(self.scope.audience,docid,src))
@@ -215,14 +216,15 @@ class ScopedStore:
         def op():
             with self.db.transaction(self.scope.audience) as c:
                 c.execute('UPDATE brodar_v2.memory_documents SET deleted=true,revision=revision+1,updated_at=now() '
-                          'WHERE audience=%s AND path=%s AND revision=%s AND NOT deleted RETURNING id,revision,content',
+                          'WHERE audience=%s AND path=%s AND revision=%s AND NOT deleted RETURNING id,revision,content,subject_ids,confidence',
                           (self.scope.audience,path,expected_revision))
                 old = c.fetchone()
                 if not old:
                     raise RevisionConflict('Context missing or changed; read again')
                 c.execute('INSERT INTO brodar_v2.memory_revisions '
-                          '(id,audience,document_id,revision,content,deleted,reason) VALUES (%s,%s,%s,%s,%s,true,%s)',
-                          (str(uuid4()),self.scope.audience,str(old[0]),old[1],old[2],reason))
+                          '(id,audience,document_id,revision,content,deleted,reason,metadata) VALUES (%s,%s,%s,%s,%s,true,%s,%s::jsonb)',
+                          (str(uuid4()),self.scope.audience,str(old[0]),old[1],old[2],reason,
+                           json.dumps({'subject_ids':old[3],'confidence':old[4]})))
                 c.execute("DELETE FROM brodar_v2.embeddings WHERE audience=%s AND kind='memory' AND source_id=%s",
                           (self.scope.audience,str(old[0])))
                 return {'deleted':True,'revision':old[1]}
@@ -259,17 +261,23 @@ class ScopedStore:
                               'GROUP BY kind,source_id ORDER BY min(embedding <=> %s::vector) LIMIT 60',
                               (self.scope.audience,model,json.dumps(vector)))
                     hits = c.fetchall()
-                    for kind,uid in hits:
+                    # Hydrate in two bounded queries instead of one remote round trip per hit.
+                    hydrated = {}
+                    for kind in ('message','memory'):
+                        ids = [str(uid) for hit_kind,uid in hits if hit_kind==kind]
+                        if not ids:continue
                         if kind=='message':
                             c.execute("SELECT 'message' AS kind,id,content,sent_at,legacy_timestamp,sender_id,"
-                                      "NULL::text AS path,source,source_id FROM brodar_v2.messages WHERE audience=%s AND id=%s",
-                                      (self.scope.audience,str(uid)))
+                                      "NULL::text AS path,source,source_id FROM brodar_v2.messages WHERE audience=%s AND id=ANY(%s::uuid[])",
+                                      (self.scope.audience,ids))
                         else:
                             c.execute("SELECT 'memory' AS kind,id,content,NULL::timestamptz AS sent_at,"
                                       "NULL::text AS legacy_timestamp,NULL::bigint AS sender_id,path,"
                                       "NULL::text AS source,NULL::text AS source_id FROM brodar_v2.memory_documents "
-                                      "WHERE audience=%s AND id=%s AND NOT deleted AND NOT needs_review",(self.scope.audience,str(uid)))
-                        semantic.extend(records(c))
+                                      "WHERE audience=%s AND id=ANY(%s::uuid[]) AND NOT deleted AND NOT needs_review",
+                                      (self.scope.audience,ids))
+                        for item in records(c):hydrated[(kind,str(item['id']))]=item
+                    semantic = [hydrated[(kind,str(uid))] for kind,uid in hits if (kind,str(uid)) in hydrated]
                 combined = {}
                 for ranking in [lexical,notes,semantic]:
                     for rank,item in enumerate(ranking):

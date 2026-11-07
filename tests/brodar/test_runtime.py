@@ -102,3 +102,40 @@ async def test_foreground_and_reflection_never_share_a_conversation_turn(tmp_pat
     assert events==['foreground']
     release.set();await asyncio.gather(task,background)
     assert events==['foreground','reflection']
+
+
+@pytest.mark.asyncio
+async def test_optional_embedding_timeout_does_not_block_turn(tmp_path):
+    store=Store()
+    original=store.turn_context
+    async def context(*args):
+        bundle=await original(*args)
+        bundle['has_index']=True
+        bundle['messages'][0]['content']='a sufficiently long conversation message'
+        return bundle
+    store.turn_context=context
+    class Embeddings:
+        model='test'
+        async def embed(self,*args,**kwargs):await asyncio.Event().wait()
+    cfg=SimpleNamespace(runtime_dir=tmp_path,brain='codex',recall_timeout_seconds=.01)
+    conversation=Conversation(cfg,store,SimpleNamespace(),Embeddings(),None)
+    conversation.brain=Brain(Outcome('completed','skip','nothing needed'))
+    await asyncio.wait_for(conversation.process(),1)
+    assert conversation.brain.calls==1
+    assert store.finished[-1]['error'] is None
+
+
+@pytest.mark.asyncio
+async def test_exhausted_addressed_failure_gets_notice(tmp_path,monkeypatch):
+    async def no_wait(*args):pass
+    monkeypatch.setattr('brodar.runtime.asyncio.sleep',no_wait)
+    store=Store();store.row['attempts']=3
+    store.row['payload']['message']['text']='brodar help me'
+    conversation=Conversation(SimpleNamespace(runtime_dir=tmp_path,brain='codex'),store,SimpleNamespace(),None,None)
+    conversation.brain=Brain(Outcome('failed',error='provider_failed'))
+    sent=[]
+    async def send(text,**kwargs):sent.append((text,kwargs))
+    conversation.broker.send_message=send
+    await conversation.process()
+    assert len(sent)==1 and sent[0][1]['call_id']=='terminal-failure'
+    assert store.finished[-1]['retry'] is False
