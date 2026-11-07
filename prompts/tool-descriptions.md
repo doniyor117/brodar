@@ -150,7 +150,7 @@ Search another approved group's available history and learned notes, with lexica
 
 ## delegate_research
 
-Delegate a concise self-contained brief to @hyperresearcher_bot in Bot Hujra. Returns task ID and return route. Yield after delegation; await an actual research reply in a later turn. Never recursively delegate a bot's request.
+Delegate a concise self-contained brief to @hyperresearcher_bot in Research Group. Returns task ID and return route. Yield after delegation; await an actual research reply in a later turn. Never recursively delegate a bot's request.
 
 ## research_tasks
 

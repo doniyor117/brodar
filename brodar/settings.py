@@ -34,7 +34,7 @@ class Settings:
     maintenance_timeout:float=120
     maintenance_idle_seconds:float=300
     automatic_recall:bool=False
-    research_chat_id:int=-1000000000102
+    research_chat_id:int=-1000000000103
     research_bot_username:str='hyperresearcher_bot'
 
     @classmethod
@@ -48,7 +48,7 @@ class Settings:
         model=values.get('BRODAR_'+provider.upper()+'_MODEL',
                          'gpt-6.1-sol' if provider=='codex' else 'claude-sonnet-4-6')
         ids=lambda v:frozenset(int(x.strip()) for x in v.split(',') if x.strip())
-        cfg=cls(research_chat_id=int(values.get('BRODAR_RESEARCH_CHAT_ID','-1000000000102')),research_bot_username=values.get('BRODAR_RESEARCH_BOT_USERNAME','hyperresearcher_bot').lstrip('@'),maintenance_idle_seconds=float(values.get('BRODAR_MAINTENANCE_IDLE_SECONDS','300')),automatic_recall=values.get('BRODAR_AUTOMATIC_RECALL','false').lower()=='true',learning_enabled=values.get('BRODAR_LEARNING_ENABLED','true').lower()=='true',
+        cfg=cls(research_chat_id=int(values.get('BRODAR_RESEARCH_CHAT_ID','-1000000000103')),research_bot_username=values.get('BRODAR_RESEARCH_BOT_USERNAME','hyperresearcher_bot').lstrip('@'),maintenance_idle_seconds=float(values.get('BRODAR_MAINTENANCE_IDLE_SECONDS','300')),automatic_recall=values.get('BRODAR_AUTOMATIC_RECALL','false').lower()=='true',learning_enabled=values.get('BRODAR_LEARNING_ENABLED','true').lower()=='true',
                 consolidation_enabled=values.get('BRODAR_CONSOLIDATION_ENABLED','false').lower()=='true',
                 consolidation_interval=float(values.get('BRODAR_CONSOLIDATION_INTERVAL','21600')),
                 maintenance_timeout=float(values.get('BRODAR_MAINTENANCE_TIMEOUT','120')),auto_compact_token_limit=int(values['BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT']) if values.get('BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT') else None,

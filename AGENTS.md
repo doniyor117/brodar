@@ -505,3 +505,8 @@ telegram_send_message and telegram_send_document accept final=true by default. T
 Validation: local Brodar suite 131 passed, 13 live opt-in skipped, one dependency warning. Five regressions cover final feedback cancellation before send and a blocked receipt save, interim progress preserving typing, ambient wake cleanup, preserving a newer unclaimed request and adopting a steered generation before bookkeeping. No migration or real Telegram test message required. Deployment record follows.
 
 Typing rollout: fix 56bfdd0 pushed to main; verified supervisor restarted gracefully with scheduled backups retained. Main bot resumed polling with Codex / gpt-6-luna at 20:55:19 phone-local time. No manual Telegram message was sent; timing behavior is verified by deterministic regressions, not a recorded live client observation.
+
+
+### Research room relocation — 2026-11-07
+
+Owner explicitly selected the newly added Research Group as the research room, replacing Bot Hujra for delegation. Telegram metadata verified the active supergroup is -1000000000103 and Brodar is an administrator there; the older basic-group entry -5502435100 reports the bot left and is not selected. The group was approved through the authenticated owner/operator session (not a fabricated Telegram /approve message), persisted in group_access under the configured owner principal. BRODAR_RESEARCH_CHAT_ID in private runtime configuration and the application default now select -1000000000103. Existing group approvals remain unchanged. Active Brodar tool/harness text and the ready-to-paste Hyperagent researcher prompt now say Research Group. Researcher remains @hyperresearcher_bot. No research/test message was sent. Restart/polling status follows.
