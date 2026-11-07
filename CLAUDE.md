@@ -1,7 +1,5 @@
-# Brodar development context
+# Brodar development guide
 
-Read [AGENTS.md](AGENTS.md) first and follow it as this repository's development guide.
+@AGENTS.md
 
-Then read [docs/brodar/PROJECT-CONTEXT.md](docs/brodar/PROJECT-CONTEXT.md) for architecture, current state, decisions, operations and remaining work. The same guide applies to Codex and Claude development agents; do not maintain a second conflicting set of instructions here.
-
-This file is not the deployed Telegram persona. That lives in `prompts/brodar.md`, with operational instructions in `prompts/brodar-harness.md`.
+The imported AGENTS.md is the complete project handoff: development rules, architecture, features, decisions, current state, deployment, validation and remaining work. Maintain that single source rather than duplicating it here. This is development context, not the Telegram bot persona.

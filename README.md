@@ -44,4 +44,4 @@ Brodar retains Hamroh's Git history and MIT attribution. The historical `hamroh`
 
 ## Continuing development
 
-Development agents: start with [AGENTS.md](AGENTS.md) and the detailed [project context](docs/brodar/PROJECT-CONTEXT.md). [CLAUDE.md](CLAUDE.md) points to the same guide.
+Development agents: read [AGENTS.md](AGENTS.md), which contains the complete project context. [CLAUDE.md](CLAUDE.md) points to the same guide.
