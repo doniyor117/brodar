@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from brodar.brains.base import Outcome
-from brodar.runtime import Conversation,undelivered_artifacts
+from brodar.runtime import Conversation,undelivered_artifacts,origin_report_needed
 from brodar.scope import Scope
 
 
@@ -38,6 +38,87 @@ class Brain:
     async def close(self):self.closed=True
     async def start(self,session_id=None):self.started.append(session_id)
     async def interrupt(self):pass
+
+
+@pytest.mark.asyncio
+async def test_queued_research_can_yield_without_delivery_repair_or_retry(tmp_path):
+    store=Store();cfg=SimpleNamespace(runtime_dir=tmp_path,brain='codex')
+    conversation=Conversation(cfg,store,SimpleNamespace(),None,None)
+    class DelegatingBrain(Brain):
+        async def turn(self,text):
+            self.calls+=1
+            conversation.broker.pending_research=True
+            return self.outcome
+    conversation.brain=DelegatingBrain(Outcome('completed','stop','research queued'))
+    await conversation.process()
+    assert conversation.brain.calls==1
+    assert store.finished[-1]['error'] is None
+    assert not store.finished[-1]['retry']
+
+
+@pytest.mark.parametrize('method',['routed_message','routed_document'])
+def test_cross_group_completion_needs_a_later_origin_report(method):
+    scope=Scope(1,-100,10)
+    local={'method':'send_message','status':'sent','topic_id':10,'request':{'text':'on it'}}
+    remote={'method':method,'status':'sent','topic_id':10,'request':{'chat_id':-200,'topic_id':0}}
+    assert origin_report_needed([remote],scope)
+    assert origin_report_needed([local,remote],scope)
+    assert not origin_report_needed([local,remote,local],scope)
+    assert origin_report_needed([remote,dict(local,response={'final':False})],scope)
+    assert origin_report_needed([remote,dict(local,method='set_reaction')],scope)
+
+
+def test_other_topic_delivery_and_unknown_outcomes_still_need_origin_feedback():
+    scope=Scope(1,-100,10)
+    remote={'method':'routed_message','status':'uncertain','topic_id':10,'request':{'chat_id':-100,'topic_id':20}}
+    assert origin_report_needed([remote],scope)
+    destination_message={'method':'send_message','status':'sent','topic_id':20,'request':{}}
+    assert origin_report_needed([remote,destination_message],scope)
+    source_message=dict(destination_message,topic_id=10)
+    assert not origin_report_needed([remote,destination_message,source_message],scope)
+
+
+@pytest.mark.parametrize('action',['stop','skip'])
+@pytest.mark.asyncio
+async def test_destination_delivery_does_not_complete_turn_until_origin_report(tmp_path,action):
+    store=Store();cfg=SimpleNamespace(runtime_dir=tmp_path,brain='codex')
+    conversation=Conversation(cfg,store,SimpleNamespace(),None,None)
+    receipts=[]
+    async def delivery_receipts(*args):return receipts
+    store.delivery_receipts=delivery_receipts
+    class RoutingBrain(Brain):
+        async def turn(self,text):
+            self.calls+=1
+            if self.calls==1:
+                receipts.append({'method':'routed_message','status':'sent','request':{'chat_id':-200,'topic_id':0}})
+            else:
+                assert 'originating' in text
+                receipts.append({'method':'send_message','status':'sent','request':{'text':'posted there'}})
+            return Outcome('completed',action,'finished')
+    conversation.brain=RoutingBrain(None)
+    await conversation.process()
+    assert conversation.brain.calls==2
+    assert store.finished[-1]['error'] is None
+
+
+@pytest.mark.asyncio
+async def test_external_research_result_cannot_silently_finish_without_answer(tmp_path):
+    store=Store();cfg=SimpleNamespace(runtime_dir=tmp_path,brain='codex')
+    store.row['payload']={'internal_research':{'task_id':str(uuid4()),'requester_id':42}}
+    conversation=Conversation(cfg,store,SimpleNamespace(),None,None)
+    receipts=[]
+    async def delivery_receipts(*args):return receipts
+    store.delivery_receipts=delivery_receipts
+    class ReportingBrain(Brain):
+        async def turn(self,text):
+            self.calls+=1
+            if self.calls==2:
+                receipts.append({'method':'send_message','status':'sent','request':{'text':'here is the result'}})
+            return Outcome('completed','skip','done')
+    conversation.brain=ReportingBrain(None)
+    await conversation.process()
+    assert conversation.brain.calls==2
+    assert store.finished[-1]['error'] is None
 
 
 @pytest.mark.asyncio

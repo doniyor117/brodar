@@ -10,11 +10,43 @@ from uuid import uuid4
 
 
 class RuntimeStore(ScopedStore):
+    async def enqueue_research_result(self,task,content):
+        """Idempotent internal input; never touches Telegram's polling cursor.
+
+        The consumer row serializes allocation of negative internal update IDs.
+        Ordinary Telegram update IDs are nonnegative. No sender is impersonated.
+        """
+        source_id=f'{task["id"]}:{task["generation"]}'
+        mid=str(uuid5(NAMESPACE_URL,self.scope.audience+':research:'+source_id))
+        iid=str(uuid5(NAMESPACE_URL,self.scope.audience+':research-input:'+source_id))
+        content=scrub(content)
+        def op():
+            with self.db.transaction(self.scope.audience) as c:
+                c.execute('SELECT 1 FROM brodar_v2.poll_state WHERE bot_id=%s AND lease_owner=%s AND lease_until>now() FOR UPDATE',
+                          (self.scope.bot_id,self.lease_owner))
+                if c.fetchone() is None:raise PermissionError('Research result consumer lease expired')
+                c.execute('SELECT update_id FROM brodar_v2.inbox WHERE audience=%s AND id=%s',(self.scope.audience,iid))
+                existing=c.fetchone()
+                if existing:return existing[0],False
+                c.execute('UPDATE brodar_v2.poll_state SET internal_update_id=internal_update_id-1 WHERE bot_id=%s RETURNING internal_update_id',(self.scope.bot_id,))
+                update_id=c.fetchone()[0]
+                c.execute('INSERT INTO brodar_v2.audience_registry(audience,instance_id,chat_id) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',
+                          (self.scope.audience,self.scope.instance_id,self.scope.chat_id))
+                c.execute("INSERT INTO brodar_v2.messages(id,audience,topic_id,sender_name,role,content,source,source_id,source_hash) "
+                          "VALUES (%s,%s,%s,'Hyper Researcher','tool',%s,'research',%s,%s) ON CONFLICT DO NOTHING",
+                          (mid,self.scope.audience,self.scope.topic_id,content,source_id,digest(content)))
+                payload={'internal_research':{'task_id':str(task['id']),'generation':task['generation'],
+                    'requester_id':task['requester_id'],'status':task['status']}}
+                c.execute('INSERT INTO brodar_v2.inbox(id,audience,topic_id,bot_id,update_id,message_id,payload) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)',
+                          (iid,self.scope.audience,self.scope.topic_id,self.scope.bot_id,update_id,mid,json.dumps(payload)))
+                return update_id,True
+        return await self.db.run(op)
+
     async def work_state(self,uid):
         def op():
             with self.db.transaction(self.scope.audience,readonly=True) as c:
                 c.execute("SELECT jsonb_build_object('receipts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) "
-                          "FROM (SELECT id,tool_call_id,method,status,response,request FROM brodar_v2.deliveries "
+                          "FROM (SELECT id,topic_id,tool_call_id,method,status,response,request FROM brodar_v2.deliveries "
                           "WHERE audience=%s AND turn_id=%s ORDER BY created_at) t),"
                           "'artifacts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id AS artifact_id,filename "
                           "FROM brodar_v2.artifacts WHERE audience=%s AND turn_id=%s) t))",
@@ -306,7 +338,7 @@ class RuntimeStore(ScopedStore):
     async def delivery_receipts(self,turn_id):
         def op():
             with self.db.transaction(self.scope.audience,readonly=True) as c:
-                c.execute('SELECT id,tool_call_id,method,status,response,request FROM brodar_v2.deliveries '
+                c.execute('SELECT id,topic_id,tool_call_id,method,status,response,request FROM brodar_v2.deliveries '
                           'WHERE audience=%s AND turn_id=%s ORDER BY created_at',
                           (self.scope.audience,str(turn_id)))
                 return records(c)

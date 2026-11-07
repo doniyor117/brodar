@@ -4,6 +4,7 @@ import re
 from hamroh.utils.secrets_scrubber import scrub as upstream_scrub
 
 _EXTRA=(re.compile(r'\bAIza[A-Za-z0-9_-]{35}\b'),
+        re.compile(r'\bhat_[A-Za-z0-9_-]{16,}\b'),
         re.compile(r'\bgithub_pat_[A-Za-z0-9_]{40,}\b'))
 
 

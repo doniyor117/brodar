@@ -14,6 +14,69 @@ from brodar.store import RevisionConflict,ScopedStore
 pytestmark=pytest.mark.skipif(not os.environ.get('BRODAR_TEST_DATABASE_URL'),reason='Disposable Neon test URL not configured')
 
 
+@pytest.mark.asyncio
+async def test_research_jobs_recovery_private_events_and_interaction_limit(stores):
+    from brodar.research import ResearchStore
+    from brodar.recovery import ConsumerLease
+    from brodar.runtime_store import RuntimeStore
+    from brodar.coordination import LoopGuard
+    a,b=stores
+    lease=ConsumerLease(a.db,a.scope.bot_id);await lease.acquire()
+    guard=LoopGuard(a.db,a.scope.instance_id);await guard.register()
+    jobs=ResearchStore(a.db,a.scope.instance_id,lambda:lease)
+    uid=str(uuid4())
+    try:
+        arguments=dict(task_id=uid,scope=a.scope,requester=42,request_id=str(uuid4()),brief='research',agent_id='a',message='brief',operation='one')
+        assert (await jobs.enqueue(**arguments))['status']=='queued'
+        assert str((await jobs.enqueue(**arguments))['id'])==uid
+        assert await jobs.list(b.scope)==[]
+        row=(await jobs.claim())[0]
+        await jobs.submitting(row)
+        # Restart between submit and receiving/persisting a remote thread ID.
+        await lease.release()
+        lease=ConsumerLease(a.db,a.scope.bot_id);await lease.acquire()
+        assert await jobs.claim()==[]
+        assert (await jobs.get(uid))['status']=='uncertain'
+        # Result events have no human sender and do not alter the poll offset.
+        event=dict(id=uid,generation=0,requester_id=42,status='uncertain')
+        first=RuntimeStore(a.db,a.scope,lease_owner=lease.owner)
+        second=RuntimeStore(a.db,b.scope,lease_owner=lease.owner)
+        update,new=await first.enqueue_research_result(event,'outside research evidence')
+        assert new and update<0
+        assert await first.enqueue_research_result(event,'outside research evidence')==(update,False)
+        other=dict(event,id=str(uuid4()))
+        other_update,new=await second.enqueue_research_result(other,'other group evidence')
+        assert new and other_update<0 and other_update!=update
+        pending=await first.claim_inputs()
+        assert len(pending)==1 and pending[0]['payload']['internal_research']['task_id']==uid
+        assert 'message' not in pending[0]['payload']
+        assert (await first.recent())[0]['source']=='research'
+        assert (await second.recent())[0]['content']=='other group evidence'
+        # Check actual SQL follow-up idempotency and the hard tenth-request cap.
+        def ready():
+            with a.db.transaction(jobs.audience) as c:
+                c.execute("UPDATE brodar_v2.research_tasks SET status='complete',remote_thread_id='t',notified_generation=generation,interactions=9 WHERE id=%s",(uid,))
+        await a.db.run(ready)
+        follow=await jobs.follow_up(uid,'one more source','follow-1')
+        assert follow['generation']==1
+        assert (await jobs.follow_up(uid,'one more source','follow-1'))['generation']==1
+        with pytest.raises(ValueError):await jobs.follow_up(uid,'changed content','follow-1')
+        claimed=(await jobs.claim())[0]
+        await jobs.submitting(claimed)
+        await jobs.update(claimed,status='complete')
+        complete=await jobs.get(uid);await jobs.notified(complete)
+        with pytest.raises(PermissionError):await jobs.follow_up(uid,'eleventh request','follow-2')
+        # An old operation replay is still idempotent after later transitions.
+        assert (await jobs.follow_up(uid,'one more source','follow-1'))['interactions']==10
+    finally:
+        await lease.release()
+        def clean():
+            with a.db.transaction(jobs.audience) as c:
+                c.execute('DELETE FROM brodar_v2.research_tasks WHERE audience=%s',(jobs.audience,))
+                c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(jobs.audience,))
+        await a.db.run(clean)
+
+
 @pytest_asyncio.fixture
 async def stores():
     db=Postgres(os.environ['BRODAR_TEST_DATABASE_URL'])

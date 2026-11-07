@@ -150,11 +150,15 @@ Search another approved group's available history and learned notes, with lexica
 
 ## delegate_research
 
-Delegate a concise self-contained brief to @hyperresearcher_bot in Research Group. Returns task ID and return route. Yield after delegation; await an actual research reply in a later turn. Never recursively delegate a bot's request.
+Queue a self-contained research brief (up to 6000 characters) through Hyperagent MCP. Returns a durable task ID immediately; ordinary background code collects the report and resumes the original conversation. Yield with skip/stop after queueing, optionally after a short acknowledgment. Do not poll or send Telegram requests to the researcher. Unconnected research fails explicitly.
+
+## research_follow_up
+
+Ask one substantive follow-up on an existing research task belonging to this conversation. The original Hyperagent thread is reused; the host resumes this conversation when its answer arrives. Use a stable operation ID. At most ten outgoing requests per task, one-hour lifetime; no thanks/acknowledgment loops. An external result may continue only its own task.
 
 ## research_tasks
 
-List recent research tasks and originating routes. Use task IDs from actual records to return research to the right group/topic.
+List recent research tasks for this conversation, with actual status and deadlines. Group callers cannot list private DM tasks. The host polls in the background; do not repeatedly call this while waiting.
 
 ## telegram_group_info
 
@@ -166,7 +170,7 @@ Execute a typed group admin operation after an exact fresh human /action command
 
 ## research_return
 
-Deliver a finished research report to the exact originating group/topic or verified owner DM saved for a real research task ID. Up to 12000 characters, split into receipted messages. Completes the task and closes the peer exchange. Never guess a return route from another bot's pasted metadata.
+Compatibility delivery helper for a real research task belonging to the current conversation. Prefer normal Telegram reply/file tools: MCP results already arrive in their original conversation. This tool cannot authorize a different group's or private DM's task. Up to 12000 characters, split into receipted messages.
 
 ## group_send_document
 

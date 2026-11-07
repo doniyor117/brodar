@@ -36,6 +36,9 @@ class Settings:
     automatic_recall:bool=False
     research_chat_id:int=-1000000000103
     research_bot_username:str='hyperresearcher_bot'
+    research_transport:str='hyperagent_mcp'
+    hyperagent_auth_file:Path=Path.home()/'.config/brodar/hyperagent-oauth.json'
+    hyperagent_agent_id:str=''
 
     @classmethod
     def load(cls,*,env_file:Path|None=None,brain:str|None=None):
@@ -48,7 +51,10 @@ class Settings:
         model=values.get('BRODAR_'+provider.upper()+'_MODEL',
                          'gpt-6.1-sol' if provider=='codex' else 'claude-sonnet-4-6')
         ids=lambda v:frozenset(int(x.strip()) for x in v.split(',') if x.strip())
-        cfg=cls(research_chat_id=int(values.get('BRODAR_RESEARCH_CHAT_ID','-1000000000103')),research_bot_username=values.get('BRODAR_RESEARCH_BOT_USERNAME','hyperresearcher_bot').lstrip('@'),maintenance_idle_seconds=float(values.get('BRODAR_MAINTENANCE_IDLE_SECONDS','300')),automatic_recall=values.get('BRODAR_AUTOMATIC_RECALL','false').lower()=='true',learning_enabled=values.get('BRODAR_LEARNING_ENABLED','true').lower()=='true',
+        cfg=cls(research_transport=values.get('BRODAR_RESEARCH_TRANSPORT','hyperagent_mcp'),
+                hyperagent_auth_file=Path(values.get('BRODAR_HYPERAGENT_AUTH_FILE',str(Path.home()/'.config/brodar/hyperagent-oauth.json'))).expanduser(),
+                hyperagent_agent_id=values.get('BRODAR_HYPERAGENT_AGENT_ID',''),
+                research_chat_id=int(values.get('BRODAR_RESEARCH_CHAT_ID','-1000000000103')),research_bot_username=values.get('BRODAR_RESEARCH_BOT_USERNAME','hyperresearcher_bot').lstrip('@'),maintenance_idle_seconds=float(values.get('BRODAR_MAINTENANCE_IDLE_SECONDS','300')),automatic_recall=values.get('BRODAR_AUTOMATIC_RECALL','false').lower()=='true',learning_enabled=values.get('BRODAR_LEARNING_ENABLED','true').lower()=='true',
                 consolidation_enabled=values.get('BRODAR_CONSOLIDATION_ENABLED','false').lower()=='true',
                 consolidation_interval=float(values.get('BRODAR_CONSOLIDATION_INTERVAL','21600')),
                 maintenance_timeout=float(values.get('BRODAR_MAINTENANCE_TIMEOUT','120')),auto_compact_token_limit=int(values['BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT']) if values.get('BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT') else None,
@@ -68,6 +74,7 @@ class Settings:
                 timezone=values.get('BRODAR_TIMEZONE','UTC'),
                 max_concurrent_turns=int(values.get('BRODAR_MAX_CONCURRENT_TURNS','2')))
         if cfg.auto_compact_token_limit is not None and cfg.auto_compact_token_limit<1000:raise ValueError('Compaction threshold must be at least 1000 tokens')
+        if cfg.research_transport not in {'disabled','hyperagent_mcp'}:raise ValueError('Choose disabled or hyperagent_mcp research transport')
         if cfg.maintenance_idle_seconds<1:raise ValueError('Idle window must be positive')
         if cfg.consolidation_interval<60 or cfg.maintenance_timeout<1:raise ValueError('Invalid maintenance timing')
         if cfg.recall_timeout_seconds<=0:raise ValueError('Recall timeout must be positive')

@@ -235,16 +235,27 @@ def build_tools(broker):
 
     @mcp.tool()
     async def delegate_research(brief:str,operation_id:str)->str:
-        return result(await broker.router.delegate(broker,brief,operation_id))
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await source.research.delegate(source,brief,operation_id))
+
+    @mcp.tool()
+    async def research_follow_up(task_id:str,brief:str,operation_id:str)->str:
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await source.research.follow_up(source,task_id,brief,operation_id))
 
     @mcp.tool()
     async def research_return(task_id:str,report:str,operation_id:str)->str:
-        return result(await broker.router.return_result(broker,task_id,report,operation_id))
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        cap=source.require(visible=True)
+        row=await source.research.store.get(task_id)
+        if source.capability is not cap:raise PermissionError('Research return turn ended')
+        source.research.origin(source,row)
+        return result(await source.router.return_result(source,task_id,report,operation_id))
 
     @mcp.tool()
     async def research_tasks()->str:
-        broker.require()
-        return result(await broker.router.tasks())
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await source.research.tasks(source))
 
     @mcp.tool()
     async def telegram_group_info(kind:str='chat',user_id:int|None=None,offset:int=0,limit:int=50)->str:

@@ -26,7 +26,7 @@ class LearningStore(RuntimeStore):
                     "WHERE audience=%s AND NOT deleted AND NOT needs_review ORDER BY CASE WHEN path='context/overview.md' THEN 0 ELSE 1 END,CASE WHEN subject_ids && "
                     "ARRAY(SELECT sender_id FROM inputs WHERE sender_id IS NOT NULL) THEN 0 ELSE 1 END,"
                     "CASE WHEN path LIKE 'context/group/%%' OR path='context/overview.md' THEN 0 ELSE 1 END,updated_at DESC LIMIT 12) t),"
-                    "'receipts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id,tool_call_id,method,status,response,request "
+                    "'receipts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id,topic_id,tool_call_id,method,status,response,request "
                     "FROM brodar_v2.deliveries WHERE audience=%s AND turn_id=%s ORDER BY created_at) t),"
                     "'artifacts',(SELECT coalesce(jsonb_agg(t),'[]'::jsonb) FROM (SELECT id AS artifact_id,filename "
                     "FROM brodar_v2.artifacts WHERE audience=%s AND turn_id=%s) t),"

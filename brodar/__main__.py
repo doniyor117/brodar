@@ -10,9 +10,11 @@ from .settings import Settings
 
 
 async def doctor(cfg):
+    from .hyperagent import HyperagentTransport
     report={'brain':cfg.brain,'model':cfg.model,'database_configured':bool(cfg.database_url),
             'telegram_configured':bool(cfg.telegram_token),'google_configured':bool(cfg.google_key),
             'allowed_chat_count':len(cfg.allowed_chats)}
+    report['research']={'transport':cfg.research_transport,'credentials_and_agent_configured':HyperagentTransport(cfg.hyperagent_auth_file,cfg.hyperagent_agent_id).ready}
     if cfg.database_url:
         from .postgres import Postgres
         db=Postgres(cfg.database_url)
@@ -32,7 +34,7 @@ async def doctor(cfg):
 
 def main():
     parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.')
-    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','backup','restore','forget-history','setup-storage'],default='run')
+    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','hyperagent-login','hyperagent-status','backup','restore','forget-history','setup-storage'],default='run')
     parser.add_argument('--brain',choices=['codex','claude'])
     parser.add_argument('--env-file',type=Path)
     parser.add_argument('--admin-url-file',type=Path,help='Private file holding an operator database URL; never pass a URL on the command line')
@@ -50,11 +52,36 @@ def main():
     parser.add_argument('--message-id',action='append',default=[])
     parser.add_argument('--project-id')
     parser.add_argument('--branch-id')
+    parser.add_argument('--agent-id',help='Hyperagent researcher ID to pin after discovery')
     args=parser.parse_args()
     logging.basicConfig(level=logging.WARNING,format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.ERROR)
     cfg=Settings.load(env_file=args.env_file,brain=args.brain)
-    if args.command=='setup-storage':
+    if args.command in {'hyperagent-login','hyperagent-status'}:
+        from .hyperagent import login,HyperagentTransport,read_auth,write_auth,HyperagentError
+        async def connect_researcher():
+            if args.command=='hyperagent-login':await login(cfg.hyperagent_auth_file)
+            transport=HyperagentTransport(cfg.hyperagent_auth_file,args.agent_id or cfg.hyperagent_agent_id)
+            value=await transport.call('list_agents')
+            agents=value.get('agents',[])
+            if isinstance(agents,dict):agents=agents.get('items',[])
+            if not isinstance(agents,list):raise HyperagentError('Unexpected Hyperagent agent listing')
+            candidates=[a for a in agents if (a.get('id') or a.get('agentId'))==(args.agent_id or cfg.hyperagent_agent_id)] if (args.agent_id or cfg.hyperagent_agent_id) else [a for a in agents if a.get('name','').strip().casefold()=='hyper researcher']
+            if len(candidates)==1:
+                selected=candidates[0]
+                record=read_auth(cfg.hyperagent_auth_file)
+                record['agent_id']=selected.get('id') or selected.get('agentId')
+                write_auth(cfg.hyperagent_auth_file,record)
+                print(json.dumps({'connected':True,'researcher_id':record['agent_id'],'name':selected.get('name'),
+                    'execution_mode':selected.get('executionMode',selected.get('execution_mode')),'tools':sorted(transport.schemas)},indent=2))
+            else:
+                print(json.dumps({'connected':True,'selection_required':True,'agents':[
+                    {'id':a.get('id') or a.get('agentId'),'name':a.get('name'),'execution_mode':a.get('executionMode',a.get('execution_mode'))} for a in agents]},indent=2))
+        try:asyncio.run(connect_researcher())
+        except Exception as exc:
+            print('Hyperagent connection failed: '+type(exc).__name__)
+            raise SystemExit(1) from None
+    elif args.command=='setup-storage':
         import os
         from dotenv import dotenv_values
         from .storage_setup import setup_storage

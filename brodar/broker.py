@@ -35,6 +35,9 @@ class ToolBroker:
         self.delivery_guard=delivery_guard
         self.owner_ids=owner_ids
         self.capability=None
+        self.research=None
+        self.research_context=()
+        self.pending_research=False
         self._reads={}
         self._source_reads=set()
         self._checked_sources={}
@@ -43,10 +46,12 @@ class ToolBroker:
         self._moderation_requests={}
         self._requests={}
 
-    def begin(self,capability:TurnCapability,*,moderation_requests=(),requests=()):
+    def begin(self,capability:TurnCapability,*,moderation_requests=(),requests=(),research_context=()):
         if self.capability is not None:raise RuntimeError('Previous capability is still active')
         UUID(capability.turn_id)
         self.capability=capability
+        self.research_context=tuple(research_context)
+        self.pending_research=False
         self._turn_started=time.monotonic()
         self._first_delivery=False
         self._reads.clear()
@@ -69,6 +74,8 @@ class ToolBroker:
 
     def end(self):
         self.capability=None
+        self.research_context=()
+        self.pending_research=False
         self._reads.clear()
         self._source_reads.clear()
         self._checked_sources.clear()
@@ -248,6 +255,7 @@ class ToolBroker:
                 await self.store.delivery_finish(receipt['id'],'failed',{'error':'telegram_returned_false'})
                 raise RuntimeError('Telegram did not confirm the action')
             result={'delivered':True}
+            if method in {'send_message','send_document'} and not final:result['final']=False
             if getattr(sent,'message_id',None):result['message_id']=sent.message_id
             elif sent is not True:
                 await self.store.delivery_finish(receipt['id'],'uncertain',{'error':'unexpected_telegram_result'})

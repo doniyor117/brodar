@@ -44,6 +44,34 @@ def undelivered_artifacts(artifacts,receipts):
     return [str(row['artifact_id']) for row in artifacts if str(row['artifact_id']) not in delivered]
 
 
+def origin_report_needed(receipts,scope):
+    """A destination delivery is not a completion report to the requester.
+
+    Require feedback after the latest remote action, not an earlier 'on it'.
+    Topic identity matters because topics share a database audience.
+    """
+    remote=[]
+    for index,row in enumerate(receipts):
+        request=row.get('request') or {}
+        routed=row.get('method') in {'routed_message','routed_document'}
+        elsewhere=(routed and (request.get('chat_id'),request.get('topic_id',0))!=(scope.chat_id,scope.topic_id)) or row.get('topic_id',scope.topic_id)!=scope.topic_id
+        if elsewhere and row['status'] in {'sent','failed','sending','uncertain'}:remote.append(index)
+    if not remote:return False
+    for row in receipts[max(remote)+1:]:
+        if (row['status']=='sent' and row.get('topic_id',scope.topic_id)==scope.topic_id
+                and row.get('method') in {'send_message','send_document','edit_message'}
+                and (row.get('response') or {}).get('final',True)):
+            return False
+    return True
+
+
+def research_feedback_needed(broker,receipts):
+    if not broker.research_context or broker.pending_research:return False
+    return not any(row['status']=='sent' and row.get('method') in {'send_message','send_document','edit_message'}
+                   and row.get('topic_id',broker.store.scope.topic_id)==broker.store.scope.topic_id
+                   and (row.get('response') or {}).get('final',True) for row in receipts)
+
+
 def private_write(path:Path,text:str):
     path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     temp=path.with_suffix(path.suffix+'.new')
@@ -169,7 +197,7 @@ class Conversation:
             def has_media(row):
                 message=row['payload'].get('message') or row['payload'].get('edited_message') or {}
                 return any(message.get(kind) for kind in ('document','photo','video','animation','audio','voice','video_note','sticker'))
-            if any(has_media(row) for row in batch):
+            if any(has_media(row) or row['payload'].get('internal_research') for row in batch):
                 await self.store.finish_inputs([r['id'] for r in batch],retry=True)
                 return  # materialize media in the next durable foreground turn
             messages=await self.store.history_get([str(r['message_id']) for r in batch])
@@ -268,15 +296,22 @@ class Conversation:
                     log.warning('Input lease renewal deferred')
 
     async def _notify_failure(self,receipts):
-        if any(r['status'] in {'sending','uncertain'} for r in receipts):return
         waiting=[]
         for row in self.inflight:
+            if row['payload'].get('internal_research'):
+                waiting.append(row['payload']['internal_research'])
+                continue
             msg=row['payload'].get('message') or row['payload'].get('edited_message') or {}
             if addressed(msg,self.store.scope.bot_id,getattr(self.bot,'username',None)):
                 waiting.append(msg)
         if not waiting:return
         try:
-            await self.broker.send_message("that failed on my side. send it again and i'll retry",call_id='terminal-failure')
+            if any(r['status'] in {'sending','uncertain'} for r in receipts):
+                text="i couldn't confirm the last delivery. i won't resend it automatically"
+            elif origin_report_needed(receipts,self.store.scope) and any(r['status']=='sent' and r.get('method') in {'routed_message','routed_document'} for r in receipts):
+                text="the other-group delivery went through, but i couldn't finish the follow-up here"
+            else:text="that failed on my side. send it again and i'll retry"
+            await self.broker.send_message(text,call_id='terminal-failure')
         except Exception:
             log.warning('Terminal failure notice could not be delivered')
 
@@ -323,12 +358,14 @@ class Conversation:
         if peer and self.broker.loop_guard and not await self.broker.loop_guard.available(peer):
             await self.store.finish_inputs([r['id'] for r in batch],error='bot_loop_limit');return
         requester=sender_meta.get('id') if not payload_message.get('sender_chat') and not peer else None
+        internal=batch[0]['payload'].get('internal_research')
+        if internal:requester=internal['requester_id']
         work=await self.store.work_begin(self._turn_id,requester,[str(r['message_id']) for r in batch])
         if work['status'] in {'done','cancelled'}:
             await self.store.finish_inputs([r['id'] for r in batch],error='cancelled' if work['status']=='cancelled' else None)
             return
         self.broker.begin(TurnCapability(self._turn_id,requester_id=requester,peer_bot_id=peer),moderation_requests=moderation_requests(batch,getattr(self.bot,'username',None)),
-                          requests=input_requests(batch))
+                          requests=input_requests(batch),research_context=[r['payload']['internal_research']['task_id'] for r in batch if r['payload'].get('internal_research')])
         await self.materialize(batch)
         if self._cancelled:
             await self.store.finish_inputs([r['id'] for r in self.inflight],error='cancelled',job_id=self._turn_id)
@@ -352,6 +389,7 @@ class Conversation:
         turn_id=self._turn_id
         prior=bundle['receipts']
         if any(r['status'] in {'sending','uncertain'} for r in prior):
+            await self._notify_failure(prior)
             await self.store.finish_inputs([r['id'] for r in batch],error='previous_delivery_uncertain',job_id=turn_id)
             return
         payload=envelope(messages,context=context,notes=bounded_notes(notes),receipts=prior)
@@ -378,7 +416,13 @@ class Conversation:
                 state=await self.store.work_state(turn_id)
                 receipts,artifacts=state['receipts'],state['artifacts']
                 if outcome.status!='completed':break
-                if outcome.action=='stop' and not any(r['status']=='sent' for r in receipts):
+                if outcome.action in {'stop','skip'} and origin_report_needed(receipts,self.store.scope):
+                    payload=load('repair-missing-origin.md')
+                    continue
+                if outcome.action in {'stop','skip'} and research_feedback_needed(self.broker,receipts):
+                    payload=load('repair-no-delivery.md')
+                    continue
+                if outcome.action=='stop' and not any(r['status']=='sent' for r in receipts) and not self.broker.pending_research:
                     payload=load('repair-no-delivery.md')
                     continue
                 missing=undelivered_artifacts(artifacts,receipts)
@@ -387,8 +431,8 @@ class Conversation:
                     continue
                 if outcome.action!='heartbeat':break
                 payload=load('continue-task.md')
-            done=outcome is not None and outcome.status=='completed' and ((outcome.action=='skip' and not undelivered_artifacts(artifacts,receipts)) or
-                (outcome.action=='stop' and any(r['status']=='sent' for r in receipts) and
+            done=outcome is not None and outcome.status=='completed' and not origin_report_needed(receipts,self.store.scope) and not research_feedback_needed(self.broker,receipts) and ((outcome.action=='skip' and not undelivered_artifacts(artifacts,receipts)) or
+                (outcome.action=='stop' and (any(r['status']=='sent' for r in receipts) or self.broker.pending_research) and
                  not undelivered_artifacts(artifacts,receipts)))
             uncertain=any(r['status'] in {'sending','uncertain'} for r in receipts)
             interrupted=self._cancelled or (outcome is not None and outcome.status=='interrupted')
@@ -444,8 +488,10 @@ async def run(cfg):
     db=Postgres(cfg.database_url)
     coordination_db=Postgres(cfg.database_url)
     routing_db=Postgres(cfg.database_url)
+    research_db=Postgres(cfg.database_url)
+    research_events_db=Postgres(cfg.database_url)
     approval_db=Postgres(cfg.database_url)
-    room_dbs=[coordination_db,routing_db,approval_db]
+    room_dbs=[coordination_db,routing_db,approval_db,research_db,research_events_db]
     learning_db=Postgres(cfg.database_url)
     jobs_db=Postgres(cfg.database_url)
     embeddings=GeminiEmbeddings(cfg.google_key) if cfg.google_key else None
@@ -470,6 +516,33 @@ async def run(cfg):
     from .routing import GroupRouter,peer_key
     router=GroupRouter(cfg,access,bot,routing_db,objects,lambda:lease)
     router.loop_guard=loop_guard
+    from .research import ResearchService,ResearchStore
+    from .hyperagent import HyperagentTransport
+    transport=HyperagentTransport(cfg.hyperagent_auth_file,cfg.hyperagent_agent_id)
+    async def research_notify(row):
+        chat_id=row['origin_chat_id']
+        if chat_id not in access.audiences():
+            log.warning('Research result withheld: origin no longer admitted task=%s',row['id'])
+            return
+        if chat_id>0 and chat_id!=row['requester_id']:raise PermissionError('Invalid private research return route')
+        scope=Scope(lease.bot_id,chat_id,row['origin_topic_id'],cfg.instance_id)
+        result=row.get('result') or {'report':row.get('error_code') or 'research_failed'}
+        report=result.get('report','')
+        artifact=None
+        if len(report)>12000 and objects:
+            artifact=await Artifacts(LearningStore(research_events_db,scope,lease_owner=lease.owner),objects).put(
+                turn_id=str(row['id']),operation_id=f'research-result:{row["generation"]}',filename=f'research-{row["id"]}.md',
+                mime='text/markdown',body=report.encode(),request_hash=hashlib.sha256(report.encode()).hexdigest(),metadata={'source':'hyperagent','task_id':str(row['id'])})
+        content=render('research-result.md',task_id=str(row['id']),status=row['status'],brief=row['brief'],
+            report=report if not artifact else report[:12000],artifact=json.dumps(artifact,default=str) if artifact else 'none',
+            thread_id=row.get('remote_thread_id') or 'none')
+        event_store=LearningStore(research_events_db,scope,lease_owner=lease.owner)
+        update_id,new=await event_store.enqueue_research_result(row,content)
+        if new:
+            learning.preempt()
+            presence.start(scope,new_work=True,update_id=update_id)
+        dispatch(scope,True)
+    research=ResearchService(cfg,ResearchStore(research_db,cfg.instance_id,lambda:lease),transport,access,research_notify)
     async def shared_factory(first):
         session_db=Postgres(cfg.database_url);room_dbs.append(session_db)
         scope=SharedScope(first.store.scope.bot_id,0,instance_id=cfg.instance_id)
@@ -498,6 +571,7 @@ async def run(cfg):
                 conversation.broker.approvals=approval_service
                 conversation.broker.router=router
                 conversation.broker.loop_guard=loop_guard
+                conversation.broker.research=research
                 await conversation.start()
                 conversations[key]=conversation
                 return conversation
@@ -561,6 +635,7 @@ async def run(cfg):
     maintenance=None
     heartbeat=None
     scheduler=None
+    research_worker=None
     try:
         await bot.initialize()
         me=await bot.get_me()
@@ -612,6 +687,7 @@ async def run(cfg):
                     except Exception as exc:log.warning('Reminder scheduler deferred: %s',type(exc).__name__)
                 await asyncio.sleep(15)
         scheduler=asyncio.create_task(scheduled_reminders(),name='brodar-reminders')
+        research_worker=asyncio.create_task(research.run(),name='brodar-research')
         while True:
             await lease.require()
             try:updates=await bot.get_updates(offset=offset,timeout=25,allowed_updates=['message','edited_message'])
@@ -685,6 +761,9 @@ async def run(cfg):
                         if c.fetchone() is None:raise PermissionError('Consumer lease expired before cursor commit')
                 if not persisted:await db.run(advance)
     finally:
+        if research_worker:
+            research_worker.cancel()
+            await asyncio.gather(research_worker,return_exceptions=True)
         if scheduler:
             scheduler.cancel()
             await asyncio.gather(scheduler,return_exceptions=True)

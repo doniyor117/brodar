@@ -2,6 +2,7 @@
 import hashlib
 import re
 from uuid import UUID,uuid4,uuid5,NAMESPACE_URL
+from types import SimpleNamespace
 from .scope import Scope
 from .learning import LearningStore
 from .broker import ToolBroker,TurnCapability
@@ -52,36 +53,13 @@ class GroupRouter:
                 target_broker.begin(TurnCapability(cap.turn_id,requester_id=cap.requester_id))
                 async def delivery_guard():guard();await self.lease().require()
                 target_broker.delivery_guard=delivery_guard
-                await target_broker.send_message(text,call_id='target:'+operation,reply_to_message_id=reply_to)
-                return True
+                sent=await target_broker.send_message(text,call_id='target:'+operation,reply_to_message_id=reply_to)
+                return SimpleNamespace(message_id=sent['message_id']) if sent.get('message_id') else True
             finally:WRITE_FENCE.reset(token)
-        return await source.deliver(cap,'routed_message',{'chat_id':chat_id,'topic_id':topic,'text':text,'reply_to':reply_to},'route:'+operation,routed_send)
+        result=await source.deliver(cap,'routed_message',{'chat_id':chat_id,'topic_id':topic,'text':text,'reply_to':reply_to},'route:'+operation,routed_send)
+        return dict(result,chat_id=chat_id,topic_id=topic)
     async def delegate(self,source,brief,operation):
-        cap=source.require(visible=True)
-        if cap.peer_bot_id:raise PermissionError('A bot cannot recursively create research tasks; finish the current exchange')
-        if len(brief)>3000 or not brief.strip():raise ValueError('Brief must contain 1..3000 characters; use artifact references for larger context')
-        chat_id=self.cfg.research_chat_id
-        self.target(chat_id)
-        scope=source.store.scope
-        task=str(uuid5(NAMESPACE_URL,f'{cap.turn_id}:research:{operation}'))
-        peer=peer_key({'username':self.cfg.research_bot_username},self.cfg.research_bot_username)
-        def save():
-            with self.db.transaction(self.loop_guard.audience) as c:
-                c.execute('INSERT INTO brodar_v2.research_tasks(audience,id,origin_chat_id,origin_topic_id,requester_id,request_id,brief) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id',
-                    (self.loop_guard.audience,task,scope.chat_id,scope.topic_id,cap.requester_id,cap.turn_id,scrub(brief)))
-                created=c.fetchone() is not None
-                c.execute('SELECT brief,origin_chat_id,origin_topic_id FROM brodar_v2.research_tasks WHERE audience=%s AND id=%s',(self.loop_guard.audience,task))
-                old=c.fetchone()
-                if list(old)!=[scrub(brief),scope.chat_id,scope.topic_id]:raise ValueError('Research operation already has different content')
-                return created
-        created=await self.db.run(save)
-        # Only a fresh human delegation resets this peer, never another bot reply.
-        # New task generation resets only at first creation; retries never replenish the cap.
-        if created:await self.loop_guard.human(chat_id)
-        text=render('research-delegation.md',username=self.cfg.research_bot_username,task_id=task,
-            source_chat=scope.chat_id,source_topic=scope.topic_id,brief=scrub(brief))
-        sent=await self.send(source,chat_id,text,operation,peer=peer)
-        return {'task_id':task,'status':'delegated','delivery':sent,'return_chat_id':scope.chat_id,'return_topic_id':scope.topic_id}
+        raise RuntimeError('Telegram research transport was replaced by Hyperagent MCP')
     async def tasks(self):
         def read():
             with self.db.transaction(self.loop_guard.audience,readonly=True) as c:
@@ -116,7 +94,7 @@ class GroupRouter:
                     return True
                 await source.deliver(cap,'research_return',{'task_id':task_id,'part':i,'text':text},f'{operation}:{i}',send_private)
         def finish():
-            with self.db.transaction(self.loop_guard.audience) as c:c.execute("UPDATE brodar_v2.research_tasks SET status='done' WHERE audience=%s AND id=%s",(self.loop_guard.audience,task_id))
+            with self.db.transaction(self.loop_guard.audience) as c:c.execute("UPDATE brodar_v2.research_tasks SET status='done' WHERE audience=%s AND id=%s AND transport='telegram'",(self.loop_guard.audience,task_id))
         await self.db.run(finish)
         if cap.peer_bot_id:await self.loop_guard.close(cap.peer_bot_id)
         return {'task_id':task_id,'status':'done','return_chat_id':chat_id,'parts':len(chunks)}
@@ -137,6 +115,7 @@ class GroupRouter:
                 if source.capability is not cap:raise PermissionError('Source turn revoked')
             broker=ToolBroker(target,self.bot,artifacts=artifacts,delivery_guard=guard)
             broker.begin(TurnCapability(cap.turn_id))
-            await broker.send_document(item['artifact_id'],caption,'target-file:'+operation)
-            return True
-        return await source.deliver(cap,'routed_document',{'chat_id':chat_id,'topic_id':topic,'artifact_id':artifact_id,'caption':caption},'route-file:'+operation,transfer)
+            sent=await broker.send_document(item['artifact_id'],caption,'target-file:'+operation)
+            return SimpleNamespace(message_id=sent['message_id']) if sent.get('message_id') else True
+        result=await source.deliver(cap,'routed_document',{'chat_id':chat_id,'topic_id':topic,'artifact_id':artifact_id,'caption':caption},'route-file:'+operation,transfer)
+        return dict(result,chat_id=chat_id,topic_id=topic)
