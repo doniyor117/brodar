@@ -412,6 +412,9 @@ async def run(cfg):
     objects=ObjectStore.from_file(cfg.storage_config)
     from .approvals import Approvals
     approval_service=Approvals(db,bot,cfg)
+    from .access import ChatAccess
+    access=ChatAccess(cfg,db)
+    approval_service.allowed_chats=access.audiences
     conversations={}
     creating={}
     dispatch_tasks={}
@@ -464,7 +467,7 @@ async def run(cfg):
 
     async def maintain(bot_id):
         while True:
-            for chat_id in cfg.allowed_chats:
+            for chat_id in sorted(access.audiences()):
                 scope=Scope(bot_id,chat_id,instance_id=cfg.instance_id)
                 store=LearningStore(learning_db,scope,lease_owner=lease.owner)
                 if not learning.idle():break
@@ -499,6 +502,7 @@ async def run(cfg):
         me=await bot.get_me()
         info=await bot.get_webhook_info()
         if info.url:raise RuntimeError('This bot has a webhook; use a separate test token or explicitly remove the webhook first')
+        await access.load()
         lease=ConsumerLease(db,me.id)
         await lease.acquire()
         parent_task=asyncio.current_task()
@@ -518,19 +522,19 @@ async def run(cfg):
                 return row[0] if row else None
         offset=await db.run(cursor)
         # Restore every pending topic for explicitly configured audiences.
-        for chat_id in cfg.allowed_chats:
+        for chat_id in sorted(access.audiences()):
             scope=Scope(me.id,chat_id,instance_id=cfg.instance_id)
             def pending_topics():
                 with db.transaction(scope.audience,readonly=True) as c:
                     c.execute("SELECT DISTINCT topic_id FROM brodar_v2.inbox WHERE audience=%s AND status IN ('pending','running')",(scope.audience,))
                     return [r[0] for r in c.fetchall()]
-            for topic in sorted(set(await db.run(pending_topics))|{0}):
+            for topic in sorted(set(await db.run(pending_topics))|({0} if chat_id in access.groups else set())):
                 await get_conversation(dataclasses.replace(scope,topic_id=topic))
         log.warning('Brodar polling as @%s with %s (%s)',me.username,cfg.brain,cfg.model)
         maintenance=asyncio.create_task(maintain(me.id),name='brodar-learning')
         async def scheduled_reminders():
             while True:
-                for chat_id in cfg.allowed_chats:
+                for chat_id in sorted(access.audiences()):
                     scope=Scope(me.id,chat_id,instance_id=cfg.instance_id)
                     store=LearningStore(jobs_db,scope,lease_owner=lease.owner)
                     reminders=Reminders(store)
@@ -560,9 +564,16 @@ async def run(cfg):
                     approval_handled=await approval_service.decide(message.chat_id,
                         message.from_user.id if message.from_user else None,message.text or '',me.id,
                         private=message.chat.type=='private',anonymous=message.sender_chat is not None or message.edit_date is not None or any(raw_message.get(k) for k in ('forward_origin','forward_from','forward_sender_name')))
-                if approval_handled:
+                group_approval=access.approval_command(raw,me.username)
+                if group_approval:
+                    await access.approve(raw,me.username)
+                    try:
+                        await bot.send_message(chat_id=message.chat_id,text="group approved. i'm in",reply_to_message_id=message.message_id,
+                            **({'message_thread_id':message.message_thread_id} if message.message_thread_id else {}))
+                    except Exception as exc:log.warning('Group approval acknowledgment unavailable: %s',type(exc).__name__)
+                if group_approval or approval_handled:
                     pass  # consumed by host; never authorizes changes through model text
-                elif message is not None and message.chat_id in cfg.allowed_chats and ordinary_message(raw_message):
+                elif message is not None and access.accepts(raw_message):
                     sender=message.from_user if message.sender_chat is None else None
                     scope=Scope(me.id,message.chat_id,message.message_thread_id or 0,cfg.instance_id)
                     text,service=describe_message(raw_message)

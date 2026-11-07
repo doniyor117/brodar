@@ -6,7 +6,7 @@ import secrets
 from .postgres import Postgres
 
 TABLES=('messages','inbox','memory_documents','memory_revisions','memory_sources',
-        'embeddings','sessions','deliveries','jobs','poll_state','reflection_state','maintenance_runs','approvals','forgotten_sources','tool_calls','artifacts','audience_registry')
+        'embeddings','sessions','deliveries','jobs','poll_state','reflection_state','maintenance_runs','approvals','group_access','forgotten_sources','tool_calls','artifacts','audience_registry')
 
 
 async def provision_runtime(db:Postgres,admin_uri:str,*,role:str,password:str|None=None):

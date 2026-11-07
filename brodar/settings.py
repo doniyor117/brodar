@@ -77,5 +77,5 @@ class Settings:
         missing=[]
         if not self.database_url:missing.append('BRODAR_DATABASE_URL')
         if not self.telegram_token:missing.append('TELEGRAM_BOT_TOKEN (or BRODAR_TEST_BOT_API_KEY)')
-        if not self.allowed_chats:missing.append('BRODAR_ALLOWED_CHATS')
+        if not self.owner_ids:missing.append('BRODAR_OWNER_IDS')
         if missing:raise ValueError('Missing: '+', '.join(missing))

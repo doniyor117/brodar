@@ -296,3 +296,27 @@ async def test_batched_index_and_exact_owner_approval(stores):
     def cleanup():
         with a.db.transaction(a.scope.audience) as c:c.execute('DELETE FROM brodar_v2.approvals WHERE audience=%s',(a.scope.audience,))
     await a.db.run(cleanup)
+
+@pytest.mark.asyncio
+async def test_group_admission_persists_across_policy_restart(stores):
+    from types import SimpleNamespace
+    from brodar.access import ChatAccess
+    a,b=stores
+    cfg=SimpleNamespace(allowed_chats={-11},owner_ids={42,73},instance_id=a.scope.instance_id)
+    access=ChatAccess(cfg,a.db)
+    try:
+        await access.load()
+        raw={'message':{'chat':{'id':-22,'type':'supergroup'},'from':{'id':42},'text':'/approve'}}
+        await access.approve(raw,'BrodarBot')
+        restored=ChatAccess(cfg,a.db);await restored.load()
+        assert restored.accepts({'chat':{'id':-22,'type':'supergroup'},'from':{'id':999}})
+        assert not restored.accepts({'chat':{'id':999,'type':'private'},'from':{'id':999}})
+        with a.db.transaction(access.audience,readonly=True) as c:
+            c.execute('SELECT approved_by FROM brodar_v2.group_access WHERE audience=%s AND chat_id=-22',(access.audience,))
+            assert c.fetchone()[0]==42
+    finally:
+        def cleanup():
+            with a.db.transaction(access.audience) as c:
+                c.execute('DELETE FROM brodar_v2.group_access WHERE audience=%s',(access.audience,))
+                c.execute('DELETE FROM brodar_v2.audience_registry WHERE audience=%s',(access.audience,))
+        await a.db.run(cleanup)

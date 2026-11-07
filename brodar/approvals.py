@@ -39,7 +39,7 @@ class Approvals:
         if len(parts)!=2 or parts[0] not in {'/approve','/deny'}:return False
         try:uid=str(UUID(parts[1]))
         except ValueError:return False
-        for target in self.cfg.allowed_chats:
+        for target in getattr(self,'allowed_chats',lambda:self.cfg.allowed_chats)():
             scope=Scope(bot_id,target,instance_id=self.cfg.instance_id)
             def update():
                 with self.db.transaction(scope.audience) as c:
