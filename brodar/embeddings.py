@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import httpx
+from .prompt_files import render
 
 MODEL = 'gemini-embedding-2'
 DIMENSIONS = 768
@@ -25,8 +26,7 @@ class GeminiEmbeddings:
     async def embed(self, text: str, *, query: bool = False) -> list[float]:
         if not text.strip() or len(text.encode('utf-8')) > 7800:
             raise ValueError('Embed one nonempty chunk of at most 7800 UTF-8 bytes')
-        prompt = (f'task: search result | query: {text}' if query
-                  else f'title: conversation context | text: {text}')
+        prompt=render('embedding-query.md' if query else 'embedding-document.md',text=text)
         try:
             response = await self._client.post(
                 f'https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:embedContent',
@@ -58,7 +58,7 @@ class GeminiEmbeddings:
             if any(not t.strip() or len(t.encode('utf-8'))>7800 for t in batch):
                 raise ValueError('Invalid embedding chunk')
             requests=[{'model':f'models/{MODEL}',
-                'content':{'parts':[{'text':f'title: conversation context | text: {t}'}]},
+                'content':{'parts':[{'text':render('embedding-document.md',text=t)}]},
                 'outputDimensionality':DIMENSIONS} for t in batch]
             try:
                 response=await self._client.post(

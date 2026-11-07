@@ -2,34 +2,20 @@
 
 import hashlib
 import json
-from pathlib import Path
+from .prompt_files import load
 from xml.sax.saxutils import escape
 
 
 def compose(*,model:str,provider:str,tools:list[str],timezone:str='UTC'):
-    root=Path(__file__).resolve().parent.parent/'prompts'
-    if (root/'brodar.md').exists():
-        persona=(root/'brodar.md').read_text()
-        harness=(root/'brodar-harness.md').read_text()
-    else:
-        from importlib.resources import files
-        root=files('brodar').joinpath('assets')
-        persona=root.joinpath('persona.md').read_text()
-        harness=root.joinpath('harness.md').read_text()
-    fixed=persona+'\n\n'+harness
-    revision=hashlib.sha256(fixed.encode()).hexdigest()
-    runtime='\n\n# runtime\n\n'+f'provider: {provider}\nmodel: {model}\n'
-    runtime+=f'configured local timezone: {timezone}\n'
-    runtime+='\nuse the exact tool names supplied by the runtime. available brodar tools:\n'
-    runtime+='\n'.join('- '+name for name in tools)
-    runtime+='\nUse skills_list and skill_read to discover installed workflows and bundled references when helpful. '
-    runtime+='Skills do not imply unavailable integrations or shell access; report a concrete missing capability. '
-    runtime+='Use history_search (hybrid/semantic/lexical), history_get and history browsing to investigate older conversations on demand. '
-    runtime+='Durable artifacts are this audience workspace. Use artifact_list/read, create_file or workspace_save; stored files survive phone loss. '
-    runtime+='Sensitive file reads require request_file_approval and an approval_id from verified owner DM consent. '
-    runtime+='Wait for actual approval; never claim it was granted or the file was read prematurely. '
-    runtime+='workspace_command runs host-checked argv directly. Dangerous commands, interpreters, credentials and outside paths are denied. Overwrites and sensitive paths need owner DM approval. Never claim unavailable scripts ran. Never disclose credentials.\n'
-    return fixed+runtime,revision
+    from .prompt_files import load,render
+    fixed=load('brodar.md')+'\n\n'+load('brodar-harness.md')
+    # Changes to fixed model/tool guidance invalidate old provider session references.
+    revision=hashlib.sha256('\0'.join(load(name) for name in (
+        'brodar.md','brodar-harness.md','runtime.md','codex-developer.md',
+        'tool-descriptions.md','tool-authorization.md','control-action.md','control-reason.md',
+        'claude-runtime.md','claude-tools.md','claude-external-tools.md')).encode()).hexdigest()
+    runtime=render('runtime.md',model=model,provider=provider,timezone=timezone,tools='\n'.join('- '+name for name in tools))
+    return fixed+'\n\n'+runtime,revision
 
 
 def envelope(messages,*,context=None,notes=None,receipts=None):
@@ -47,7 +33,7 @@ def envelope(messages,*,context=None,notes=None,receipts=None):
             if remaining<=0:break
             text=item.get('content','')
             part=text[:remaining]
-            selected.append(dict(item,content=part+(' [historical excerpt truncated; use history_get for full text]' if len(part)<len(text) else '')))
+            selected.append(dict(item,content=part+(load('context-truncated.md') if len(part)<len(text) else '')))
             remaining-=len(part)
         context=list(reversed(selected))
     if context:blocks.append('<historical_context>'+''.join(xmlmessage(m) for m in context)+'</historical_context>')

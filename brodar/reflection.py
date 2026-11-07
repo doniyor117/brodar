@@ -6,18 +6,9 @@ from uuid import uuid4
 
 from .broker import TurnCapability
 from .prompts import authorized,envelope
+from .prompt_files import load,render
 
 log=logging.getLogger('brodar.learning')
-GUIDANCE='''Private memory maintenance. Learn freely from conversations and feedback.
-Create, correct, merge or retire supplementary notes; read full notes before editing.
-Chunk metadata marks partial messages; do not infer missing text. Use history tools to check cited originals. Preserve dates, uncertainty and whose
-preference applies in which situation. Jokes and opinions are not verified facts.
-Keep useful writing advice, social context, interests, plans and task methods.
-Main persona and permissions stay fixed. Maintain context/overview.md as a small
-index (aim under 2000 characters) linking useful notes, not a copy of all knowledge.
-For derived notes, carry forward original source UUIDs from all notes you use.
-Correct conflicting evidence and retire stale duplicates. No change is also valid.
-Return {"action":"skip","reason":"brief result"} when finished.'''
 
 class Maintenance:
     def __init__(self,cfg,factory,semaphore,busy):
@@ -62,8 +53,8 @@ class Maintenance:
                     cap=TurnCapability(run['id'],mode='reflection')
                     worker.broker.begin(cap)
                     notes=await worker.store.memory_list(40)
-                    payload=GUIDANCE+'\nmode: '+run['kind']+'\n'+envelope([],context=run['messages'],notes=notes)
-                    if run['kind']=='consolidation':payload+='\nReview these full candidate notes: '+str(run['notes'])
+                    payload=render('memory-turn.md',guidance=load('memory-maintenance.md'),mode=run['kind'],context=envelope([],context=run['messages'],notes=notes))
+                    if run['kind']=='consolidation':payload+='\n'+render('memory-consolidation.md',notes=str(run['notes']))
                     outcome=await worker.brain.turn(authorized(payload,cap))
                     if outcome.status=='completed' and outcome.action in {'skip','stop'}:
                         # Capture capability identity through thread/commit checks.

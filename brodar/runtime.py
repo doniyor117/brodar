@@ -23,6 +23,7 @@ from .embeddings import GeminiEmbeddings,EmbeddingError
 from .mcp import ScopedMcpServer
 from .postgres import Postgres
 from .prompts import compose,envelope,authorized
+from .prompt_files import load,render
 from .runtime_store import RuntimeStore
 from .learning import LearningStore,chunks,bounded_notes
 from .scope import Scope
@@ -341,14 +342,14 @@ class Conversation:
                 receipts,artifacts=state['receipts'],state['artifacts']
                 if outcome.status!='completed':break
                 if outcome.action=='stop' and not any(r['status']=='sent' for r in receipts):
-                    payload='No successful public delivery exists for this turn. Complete the requested work through the available tools, or explicitly skip if a reply is unnecessary.'
+                    payload=load('repair-no-delivery.md')
                     continue
                 missing=undelivered_artifacts(artifacts,receipts)
                 if outcome.action in {'stop','skip'} and missing:
-                    payload='These created files have not been delivered: '+', '.join(missing)+'. Send each actual artifact through telegram_send_document before finishing.'
+                    payload=render('repair-missing-files.md',artifact_ids=', '.join(missing))
                     continue
                 if outcome.action!='heartbeat':break
-                payload='Continue the unfinished task. Finish through the actual tools. Do not repeat already delivered messages.'
+                payload=load('continue-task.md')
             done=outcome is not None and outcome.status=='completed' and ((outcome.action=='skip' and not undelivered_artifacts(artifacts,receipts)) or
                 (outcome.action=='stop' and any(r['status']=='sent' for r in receipts) and
                  not undelivered_artifacts(artifacts,receipts)))

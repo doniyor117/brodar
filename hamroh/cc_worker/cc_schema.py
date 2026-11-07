@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from brodar.prompt_files import load
 
 #: Hard cap on ``reason``. At ~4 chars/token that's ~25 tokens worst case;
 #: paired with the system-prompt nudge ("≤10 words, terse") a well-behaved
@@ -22,22 +23,12 @@ CONTROL_ACTION_SCHEMA: dict = {
         "action": {
             "type": "string",
             "enum": ["stop", "skip", "heartbeat"],
-            "description": (
-                "What to do after this turn. 'stop' is valid only after a "
-                "reply was delivered via telegram_send_message or telegram_reply_to_message — "
-                "plain text blocks are never shown to the user. "
-                "'skip' means deliberately sending nothing (group chatter not "
-                "addressed to you, or the user explicitly asked for no reply)."
-            ),
+            "description": load('control-action.md'),
         },
         "reason": {
             "type": "string",
             "maxLength": REASON_MAX_LENGTH,
-            "description": (
-                "Terse justification (≤10 words). "
-                "REQUIRED non-empty when action is 'stop' or 'skip'. "
-                "Optional (may be omitted) when action is 'heartbeat'."
-            ),
+            "description": load('control-reason.md'),
         },
     },
     "required": ["action"],

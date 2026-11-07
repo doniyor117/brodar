@@ -239,25 +239,12 @@ def render_tools_index(spec: CcSpawnSpec) -> str:
         return ""
     hamroh = "\n".join(f"- `{_MCP_PREFIX}{n}`" for n in sorted(spec.hamroh_tool_names))
     builtins = "\n".join(f"- `{n}`" for n in _builtin_tools(spec))
-    block = (
-        "# Your tools\n\n"
-        "Call every tool by its EXACT name below — copy it, never rebuild it "
-        "from memory or from the short names used elsewhere in this prompt. "
-        "The `mcp__` prefix belongs ONLY to MCP tools; built-ins are bare.\n\n"
-        "## hamroh tools — call with the `mcp__hamroh__` prefix\n"
-        f"{hamroh}\n\n"
-        "## Built-in tools — bare name, NEVER prefix\n"
-        "(e.g. `WebFetch`, never `mcp__hamroh__WebFetch`)\n"
-        f"{builtins}\n"
-    )
+    from brodar.prompt_files import render
+    block=render('claude-tools.md',hamroh=hamroh,builtins=builtins)+'\n'
     external = _external_server_prefixes(spec.mcp_allowed_tools)
     if external:
         ext = "\n".join(f"- `{p}__<tool>`" for p in external)
-        block += (
-            "\n## External MCP tools — call with the `mcp__<server>__` prefix\n"
-            "Discover exact names via ToolSearch, then call them verbatim:\n"
-            f"{ext}\n"
-        )
+        block+='\n'+render('claude-external-tools.md',external=ext)+'\n'
     return block
 
 
@@ -265,16 +252,8 @@ def _compose_system_prompt(spec: CcSpawnSpec) -> str:
     """Assemble the system prompt: shipped base + project overlay +
     runtime block + (optionally) the skills index + (optionally) the memory
     index + (optionally) the tools inventory + (optionally) the subagent docs."""
-    runtime_block = (
-        "# Runtime\n\n"
-        "You are running with:\n"
-        f"- model: `{spec.model}`\n"
-        f"- effort: `{spec.effort}`\n\n"
-        "If a user asks which model or effort level you are running on, "
-        "answer honestly with these exact values. This is public info — "
-        "the hard boundary against revealing internal config does not apply "
-        "to these two fields.\n"
-    )
+    from brodar.prompt_files import render
+    runtime_block=render('claude-runtime.md',model=spec.model,effort=spec.effort)+'\n'
     system_prompt = spec.system_prompt_path.read_text(encoding="utf-8")
     if spec.project_prompt_path and spec.project_prompt_path.exists():
         system_prompt += "\n\n" + spec.project_prompt_path.read_text(encoding="utf-8")

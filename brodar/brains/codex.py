@@ -17,6 +17,7 @@ from pathlib import Path
 from hamroh.cc_worker.cc_schema import CONTROL_ACTION_SCHEMA
 
 from .base import Outcome, terminal
+from ..prompt_files import load
 from .rpc import RpcError, RpcProcess
 
 CODEX_CONTROL_SCHEMA=copy.deepcopy(CONTROL_ACTION_SCHEMA)
@@ -89,8 +90,7 @@ class CodexBrain:
         await self.rpc.notify('initialized')
         params = {'model':self.model,'approvalPolicy':'never','sandbox':'read-only',
                   'cwd':str(self.cwd),'baseInstructions':self.instructions,
-                  'developerInstructions':'Use only the configured Brodar tools and public web research. '
-                    'No native environment access is provided. Terminal output is internal control, never a public reply.',
+                  'developerInstructions':load('codex-developer.md'),
                   'runtimeWorkspaceRoots':[],'config':{'web_search':'live',
                     'features.shell_tool':False,'features.apply_patch_freeform':False,
                     'features.multi_agent':False,'features.js_repl':False}}

@@ -1,0 +1,1 @@
+What to do after this turn. 'stop' is valid only after a reply was delivered via telegram_send_message or telegram_reply_to_message — plain text blocks are never shown to the user. 'skip' means deliberately sending nothing (group chatter not addressed to you, or the user explicitly asked for no reply).
