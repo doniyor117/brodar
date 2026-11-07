@@ -31,6 +31,17 @@ class BearerAuth:
 def result(value):return json.dumps(value,default=str,ensure_ascii=False)
 
 
+def audit_result(value):
+    # Vision input belongs in the tool response, not a base64 copy in Neon audits.
+    from mcp.types import ImageContent,TextContent
+    from mcp.server.fastmcp.utilities.types import Image
+    from .redaction import scrub_object
+    if isinstance(value,(ImageContent,Image)):return {'type':'image','omitted':True}
+    if isinstance(value,TextContent):return {'type':'text','text':scrub_object(value.text)}
+    if isinstance(value,(list,tuple)):return [audit_result(item) for item in value]
+    return scrub_object(value)
+
+
 class AuditedMcp(FastMCP):
     def __init__(self,broker):
         self.broker=broker
@@ -95,7 +106,7 @@ class AuditedMcp(FastMCP):
                     arguments=dict(signature.bind_partial(*values,**named).arguments)
                     from .redaction import scrub_object
                     record=dict(turn_id=cap.turn_id if cap else None,name=fn.__name__,
-                        arguments=scrub_object(arguments),result=scrub_object(output),error=error,duration_ms=int((time.monotonic()-start)*1000))
+                        arguments=scrub_object(arguments),result=audit_result(output),error=error,duration_ms=int((time.monotonic()-start)*1000))
                     if self.audit_worker:
                         await self.audit_queue.put((getattr(self.broker,'audit_store',self.broker.store),record))  # bounded backpressure, no unowned task per call
                     else:await self.broker.store.audit_tool(**record)
@@ -241,9 +252,15 @@ def build_tools(broker):
         return result(await chat_action(source,action,parameters,operation_id))
 
     @mcp.tool()
-    async def telegram_media_lookup(kind:str,identifier:str,offset:int=0)->str:
+    async def telegram_media_lookup(kind:str,identifier:str,offset:int=0):
         from .telegram_media import lookup
         source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        if kind=='sticker_preview':
+            from .telegram_media import sticker_preview
+            from mcp.types import TextContent
+            from mcp.server.fastmcp.utilities.types import Image
+            metadata,png=await sticker_preview(source,identifier,offset)
+            return [TextContent(type='text',text=result(metadata)),Image(data=png,format='png').to_image_content()]
         return result(await lookup(source,kind,identifier,offset))
 
     @mcp.tool()

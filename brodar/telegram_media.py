@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 import re
+import asyncio
+import io
 from uuid import UUID
 from urllib.parse import urlsplit
 
@@ -22,6 +24,79 @@ MEDIA_OPTIONS={
     'video_note':{'duration','length'},'sticker':{'emoji'},'document':{'disable_content_type_detection'},
 }
 COMMON={'disable_notification','protect_content','parse_mode'}
+
+
+def sticker_set_name(identifier):
+    if identifier.startswith('https://t.me/addstickers/'):
+        identifier=urlsplit(identifier).path.rsplit('/',1)[-1]
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,120}',identifier):raise ValueError('Use an actual sticker set name')
+    return identifier
+
+
+async def sticker_preview(broker,identifier,offset=0):
+    """Return a transient numbered contact sheet and its exact file-ID mapping."""
+    cap=broker.require()
+    if offset<0:raise ValueError('Sticker offset must be nonnegative')
+    pack=await broker.bot.get_sticker_set(sticker_set_name(identifier))
+    selected=pack.stickers[offset:offset+20]
+    if not selected:raise ValueError('No stickers at this offset')
+    semaphore=asyncio.Semaphore(4)
+
+    def check():
+        fence=WRITE_FENCE.get()
+        if fence:fence()
+        if broker.capability is not cap:raise PermissionError('Sticker preview turn ended')
+
+    async def fetch(index,sticker):
+        entry={'index':index,'file_id':sticker.file_id,'emoji':sticker.emoji,
+               'preview':'thumbnail' if sticker.is_animated or sticker.is_video else 'artwork'}
+        target=getattr(sticker,'thumbnail',None) if sticker.is_animated or sticker.is_video else sticker
+        if target is None:return dict(entry,preview='unavailable'),None
+        async with semaphore:
+            check()
+            try:
+                async with asyncio.timeout(15):
+                    file=await broker.bot.get_file(target.file_id)
+                    if (file.file_size or 0)>2_000_000:raise ValueError('Preview exceeds 2 MB')
+                    body=bytes(await file.download_as_bytearray())
+                    if len(body)>2_000_000:raise ValueError('Preview exceeds 2 MB')
+            except Exception as exc:
+                check()
+                return dict(entry,preview='unavailable',error=type(exc).__name__),None
+            check()
+            return entry,body
+
+    async with asyncio.timeout(60):
+        images=await asyncio.gather(*(fetch(offset+i+1,s) for i,s in enumerate(selected)))
+    check()
+
+    def render():
+        from PIL import Image,ImageDraw
+        columns=min(4,len(images));cell_w,cell_h=360,392
+        sheet=Image.new('RGB',(columns*cell_w,math.ceil(len(images)/columns)*cell_h),'#e4e4e4')
+        draw=ImageDraw.Draw(sheet)
+        for i,(entry,body) in enumerate(images):
+            x,y=(i%columns)*cell_w,(i//columns)*cell_h
+            draw.rectangle((x+2,y+2,x+cell_w-3,y+cell_h-3),outline='#999999',width=2)
+            if body:
+                try:
+                    with Image.open(io.BytesIO(body)) as image:
+                        if image.width*image.height>4_000_000:raise ValueError('Preview dimensions too large')
+                        image=image.convert('RGBA');image.thumbnail((cell_w-16,cell_h-44))
+                        sheet.paste(image,(x+(cell_w-image.width)//2,y+8+(cell_h-44-image.height)//2),image)
+                except Exception:
+                    entry['preview']='unavailable'
+            if entry['preview']=='unavailable':draw.text((x+16,y+150),'preview unavailable',fill='black',font_size=20)
+            label=str(entry['index'])+(' (thumbnail)' if entry['preview']=='thumbnail' else '')
+            draw.text((x+12,y+cell_h-32),label,fill='black',font_size=24)
+        output=io.BytesIO();sheet.save(output,format='PNG')
+        return output.getvalue()
+
+    png=await asyncio.to_thread(render)
+    check()
+    return {'name':pack.name,'title':pack.title,'total':len(pack.stickers),
+            'next_offset':offset+20 if len(pack.stickers)>offset+20 else None,
+            'stickers':[entry for entry,_ in images]},png
 
 
 def clean_text(text,limit=1024):
@@ -214,9 +289,7 @@ async def lookup(broker,kind,identifier,offset=0):
                 filename=filename,mime=mime,body=body,request_hash=hashlib.sha256(body).hexdigest(),metadata={'source':'telegram-file','file_id':identifier})
         return result
     if kind=='sticker_set':
-        if identifier.startswith('https://t.me/addstickers/'):identifier=urlsplit(identifier).path.rsplit('/',1)[-1]
-        if not re.fullmatch(r'[A-Za-z0-9_]{1,120}',identifier):raise ValueError('Use an actual sticker set name')
-        value=await broker.bot.get_sticker_set(identifier)
+        value=await broker.bot.get_sticker_set(sticker_set_name(identifier))
         if offset<0:raise ValueError('Sticker offset must be nonnegative')
         return {'name':value.name,'title':value.title,'total':len(value.stickers),'next_offset':offset+50 if len(value.stickers)>offset+50 else None,
             'stickers':[{'file_id':s.file_id,'emoji':s.emoji,'is_animated':s.is_animated,'is_video':s.is_video,'width':s.width,'height':s.height} for s in value.stickers[offset:offset+50]]}

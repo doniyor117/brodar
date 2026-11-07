@@ -123,3 +123,60 @@ async def test_caption_edit_checks_message_ownership_and_chat_actions_cannot_con
 def test_private_media_urls_and_credentials_are_rejected():
     for value in ['file:///etc/passwd','https://127.0.0.1/private','https://user:pass@example.org/image.png','https://example.org/hat_'+'A'*30]:
         with pytest.raises((ValueError,PermissionError)):public_url(value)
+
+
+@pytest.mark.asyncio
+async def test_sticker_grid_reaches_model_as_image_with_exact_ids_and_no_durable_copy():
+    import base64,io,json
+    from PIL import Image
+    from brodar.mcp import build_tools
+    source,store,bot,files=broker();audits=[]
+    async def audit_tool(**record):audits.append(record)
+    store.audit_tool=audit_tool
+    image=io.BytesIO();Image.new('RGBA',(100,100),'red').save(image,format='WEBP')
+    body=image.getvalue();downloads=[]
+    async def pack(name):
+        return SimpleNamespace(name=name,title='pack',stickers=[SimpleNamespace(file_id=f'sticker_file_{i}',emoji='👋',
+            is_animated=False,is_video=False) for i in range(21)])
+    async def file(identifier):
+        async def download():downloads.append(identifier);return bytearray(body)
+        return SimpleNamespace(file_size=len(body),download_as_bytearray=download)
+    bot.get_sticker_set=pack;bot.get_file=file
+    mcp=build_tools(source)
+    output=await mcp.call_tool('telegram_media_lookup',{'kind':'sticker_preview',
+        'identifier':'https://t.me/addstickers/ExamplePack','turn_token':source.capability.token})
+    metadata=json.loads(output[0].text)
+    assert metadata['next_offset']==20 and metadata['total']==21
+    assert metadata['stickers'][0]['index']==1 and metadata['stickers'][0]['file_id']=='sticker_file_0'
+    assert len(downloads)==20
+    assert output[1].type=='image' and output[1].mimeType=='image/png'
+    with Image.open(io.BytesIO(base64.b64decode(output[1].data))) as grid:
+        assert grid.size==(1440,1960)
+        assert grid.getpixel((180,182))[0]>240
+    assert audits[-1]['result'][1]=={'type':'image','omitted':True}
+    assert not store.rows  # Neither Telegram sends nor durable artifact writes.
+
+
+@pytest.mark.asyncio
+async def test_grid_uses_animation_thumbnail_and_marks_missing_artwork():
+    import io
+    from PIL import Image
+    from brodar.telegram_media import sticker_preview
+    source,store,bot,files=broker();downloads=[]
+    buffer=io.BytesIO();Image.new('RGB',(50,50),'blue').save(buffer,format='PNG')
+    async def pack(name):
+        return SimpleNamespace(name=name,title='pack',stickers=[
+            SimpleNamespace(file_id='animated_sticker',emoji='',is_animated=True,is_video=False,
+                thumbnail=SimpleNamespace(file_id='thumbnail_file')),
+            SimpleNamespace(file_id='video_sticker',emoji='',is_animated=False,is_video=True,thumbnail=None)])
+    async def file(identifier):
+        downloads.append(identifier)
+        async def download():return buffer.getvalue()
+        return SimpleNamespace(file_size=100,download_as_bytearray=download)
+    bot.get_sticker_set=pack;bot.get_file=file
+    metadata,png=await sticker_preview(source,'ExamplePack')
+    assert downloads==['thumbnail_file']
+    assert metadata['stickers'][0]['preview']=='thumbnail'
+    assert metadata['stickers'][0]['file_id']=='animated_sticker'
+    assert metadata['stickers'][1]['preview']=='unavailable'
+    assert png.startswith(b'\x89PNG')
