@@ -651,8 +651,11 @@ async def run(cfg):
     async def make_worker(scope):
         return Conversation(cfg,LearningStore(learning_db,scope,lease_owner=lease.owner),bot,embeddings,semaphore,
                             delivery_guard=lease.require)
-    learning=Maintenance(cfg,make_worker,asyncio.Semaphore(1),
-        lambda:bool(creating) or bool(dispatch_tasks) or any(c.wake.is_set() or c.inflight or c._turn_lock.locked() for c in conversations.values()))
+    def foreground_busy():
+        active=list(conversations.values())
+        if terminal_session and terminal_session.conversation:active.append(terminal_session.conversation)
+        return bool(owner_jobs.tasks) or bool(creating) or bool(dispatch_tasks) or any(c.wake.is_set() or c.inflight or c._turn_lock.locked() for c in active)
+    learning=Maintenance(cfg,make_worker,asyncio.Semaphore(1),foreground_busy)
 
     async def maintain(bot_id):
         while True:
@@ -692,7 +695,7 @@ async def run(cfg):
         me=await bot.get_me()
         from .maintenance import cleanup_files
         cleanup_db=Postgres(cfg.database_url)
-        cleanup_worker=asyncio.create_task(cleanup_files(cfg,cleanup_db,me.id,lambda:bool(owner_jobs.tasks) or any(c.inflight for c in conversations.values())),name="brodar-file-cleanup")
+        cleanup_worker=asyncio.create_task(cleanup_files(cfg,cleanup_db,me.id,foreground_busy),name="brodar-file-cleanup")
         info=await bot.get_webhook_info()
         if info.url:raise RuntimeError('This bot has a webhook; use a separate test token or explicitly remove the webhook first')
         await access.load()
@@ -731,7 +734,9 @@ async def run(cfg):
                     'backup_schedule':json.loads((cfg.runtime_dir/'backup-schedule.json').read_text()) if (cfg.runtime_dir/'backup-schedule.json').exists() else None,
                     'cleanup_schedule':json.loads((cfg.runtime_dir/'cleanup-schedule.json').read_text()) if (cfg.runtime_dir/'cleanup-schedule.json').exists() else None}
             if method=='groups':return [{'chat_id':chat} for chat in sorted(access.groups)]
-            if method=='chat_send':return await terminal_session.send(str(params.get('text','')))
+            if method=='chat_send':
+                learning.preempt()
+                return await terminal_session.send(str(params.get('text','')))
             if method=='chat_read':return terminal_session.bot.output
             if method=='skills':
                 from .skills import LIBRARY

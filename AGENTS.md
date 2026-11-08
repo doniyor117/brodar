@@ -117,3 +117,6 @@ Remaining operator/live acceptance items (do not fake these):
 - [ ] Legacy cached skills whose installer did not record a source commit need provenance reconstruction for exact reproduction; future installs emit source/ref/commit receipts. Do not invent upstream commits from content hashes.
 
 Keep implemented/tested/deployed/published status distinct. When changing code, update this guide and run the relevant focused checks; repeat the broad suite only for new changes/failures or a coherent release checkpoint.
+
+
+Post-release corrections: managed restart now clears the old running flag after drain; focused regression and real restart succeeded. Owner jobs and terminal foreground work are also part of the idle predicate; terminal input preempts learning. This prevents reflection/cleanup treating detached owner work or local chat as idle. Root AGENTS.md/CLAUDE.md are the sole active development handoff; redundant legacy .claude/CLAUDE.md was removed. Hosted Actions were refused before jobs started because the account reported a billing/spending restriction; local checks are the validation evidence until that external restriction clears.
