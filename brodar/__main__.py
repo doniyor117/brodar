@@ -27,6 +27,8 @@ DAILY COMMANDS
   brodar login codex              Authorize Brodar's Codex profile
   brodar login claude             Authorize Brodar's Claude profile
   brodar login                    Use configured brain (default: codex)
+  brodar hyperagent-login         Authorize optional Hyperagent research
+  brodar configure research       Enable/select the connected researcher
 
 HELP AND REMOVAL
   brodar --help                    Show all commands and flags
@@ -36,7 +38,7 @@ HELP AND REMOVAL
   brodar service uninstall        Remove this profile's matching launcher
 
 Service actions: start, stop, restart, status, logs, install, uninstall.
-Configure sections: brain, telegram, owner, neon, persona, budgets.
+Configure sections: brain, telegram, owner, neon, persona, budgets, research.
 Profile: export --output DIRECTORY; import --archive PROFILE_JSON.
 All commands accept --profile PATH for a separate instance.
 Full installation, updates, platform launchers and removal: README.md.

@@ -87,6 +87,25 @@ async def neon_wizard(engine,q,*,existing_file=None):
             print(await neon.storage(branch))
         return result
 
+async def configure_research(engine,q):
+    """Enable a previously authorized research connection; no remote run is started."""
+    from .settings import Settings
+    from .hyperagent import read_auth,HyperagentTransport
+    settings=engine.profile['settings']
+    if not await q.yes('Enable optional Hyperagent research?',settings.get('BRODAR_RESEARCH_TRANSPORT')=='hyperagent_mcp'):
+        engine.set('BRODAR_RESEARCH_TRANSPORT','disabled');engine.done('research','disabled');return
+    cfg=Settings.load(profile=engine.path)
+    record=read_auth(cfg.hyperagent_auth_file)
+    agent=await q.ask('Researcher agent ID (from brodar hyperagent-status)',settings.get('BRODAR_HYPERAGENT_AGENT_ID') or record.get('agent_id',''))
+    agent=agent.strip()
+    if not agent or len(agent)>200 or any(c.isspace() for c in agent):raise ValueError('Enter the researcher agent ID shown by hyperagent-status, not its Telegram username')
+    if not HyperagentTransport(cfg.hyperagent_auth_file,agent).ready:
+        raise ValueError('Authorize first with brodar hyperagent-login, then retry configure research')
+    engine.set('BRODAR_HYPERAGENT_AGENT_ID',agent)
+    engine.set('BRODAR_RESEARCH_TRANSPORT','hyperagent_mcp');engine.done('research')
+    print('Research enabled. Verify with brodar hyperagent-status --agent-id '+agent+'; restart the worker to apply. No research task was sent.')
+
+
 async def wizard(path=None,*,plain=False,advanced=False,section=None,non_interactive=False,admin_file=None):
     from .settings import Settings
     if not sys.stdin.isatty() and not non_interactive:raise ValueError('No interactive terminal. Use --non-interactive with a prepared profile, or run over an interactive SSH terminal')
@@ -136,6 +155,7 @@ async def wizard(path=None,*,plain=False,advanced=False,section=None,non_interac
                         cfg=Settings.load(profile=engine.path)
                         if cfg.database_url and not await q.yes('Reconfigure the existing Neon connection?'):pass
                         else:print(await neon_wizard(engine,q,existing_file=admin_file))
+                    elif step=='research':await configure_research(engine,q)
                     elif step=='storage':print(await neon_wizard(engine,q,existing_file=admin_file))
                     elif step=='persona':
                         engine.set('BRODAR_ALIASES',await q.ask('Name aliases (comma separated)',settings.get('BRODAR_ALIASES','brodar,samy,simon')))

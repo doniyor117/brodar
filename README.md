@@ -12,7 +12,7 @@ brodar onboard
 brodar onboard --plain
 ```
 
-**Start here:** [Quickstart](#quickstart) · [Commands](#run-stop-and-open-the-tui) · [Update](#update) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
+**Start here:** [Quickstart](#quickstart) · [Commands](#run-stop-and-open-the-tui) · [Hyperagent research](#optional-hyperagent-research) · [Update](#update) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
 
 ## How it works
 
@@ -213,6 +213,79 @@ Use `codex` instead when switching back to Codex. `doctor --offline` shows the s
 
 For another instance, add the same profile path to every command: `brodar login claude --profile /path/profile.json` and `brodar service restart --profile /path/profile.json`.
 
+## Optional Hyperagent research
+
+[Hyperagent](https://hyperagent.com/) can be Brodar's remote research partner. Brodar sends it a focused assignment; the researcher uses its own configured tools/connections and returns evidence that Brodar can use in the original conversation. This is optional: ordinary Brodar chat, memory and local tools work without it. It works with either Brodar brain.
+
+### What it adds
+
+A researcher can combine browsing/search with connected services: **YouTube**, **Instagram**, **Twitter/X**, and **Google Workspace** apps such as Gmail, Drive, Docs, Sheets, Slides and Calendar. Connect the required accounts under Hyperagent **Settings → Integrations**, then attach those connections to the researcher agent. YouTube/account actions, video analysis, public search and access to private content are different capabilities; use what the selected tools and permissions actually provide. A connection is not unlimited access to every video/post/account. See Hyperagent's [integrations guide](https://www.hyperagent.com/docs/integrations/) and [action catalogue](https://www.hyperagent.com/docs/concepts/agents/autonomy/access-policy-json).
+
+Examples: investigate sources across X and the web; analyze an accessible YouTube video; inspect available Instagram content; find authorized Drive documents; or prepare research for a presentation. Brodar receives the report, not the connected accounts' credentials. Only attach private accounts whose information you intend the researcher to use for the chats that can request research.
+
+### ChatGPT sign-in and costs
+
+Hyperagent offers **Sign in with ChatGPT**. For an existing Hyperagent account, open **Settings → AI providers → Continue with ChatGPT**, approve subscription sharing, and confirm the connection says **Active**. Account sign-in alone does not share the subscription. Eligible supported GPT usage can draw from that allowance; other models, search/browser/connected-service actions and image generation may still be billed by Hyperagent. Review its fallback-to-paid-plan setting and usage limits. This connection is separate from `brodar login codex`. Source: [Hyperagent's ChatGPT connection guide](https://www.hyperagent.com/docs/billing/plans/connect-chatgpt-subscription).
+
+### 1. Create and configure the researcher
+
+In Hyperagent, create an agent named **Hyper Researcher**. You can use [the included research prompt](prompts/hyperresearcher-system.md): it requests detailed, source-linked reports for a receiving agent, including uncertainty, access failures and actionable findings. Enable needed tools, connect/attach integrations, and choose its model/provider there. Customizing this cloud agent does not change Brodar's local persona.
+
+For MCP execution, choose an execution mode that supports unattended runs. Hyperagent currently rejects legacy **Ask first** agents through MCP; configure **Auto** and an appropriate access policy for this research agent. MCP authorization does not grant Brodar permission to approve arbitrary remote actions. Read the [MCP invocation documentation](https://www.hyperagent.com/docs/concepts/agents/invocations/mcp-server).
+
+No Telegram research group, researcher bot, email address or bot-to-bot reply setting is needed for this transport.
+
+### 2. Add the MCP server and authorize Brodar
+
+Install the **Codex CLI** using the platform instructions above, even if Brodar uses Claude. The current Hyperagent login helper uses Codex as its OAuth client; that does **not** require selecting Codex as Brodar's brain or signing into an OpenAI model account.
+
+```sh
+codex mcp add hyperagent --url https://hyperagent.com/api/mcp
+brodar hyperagent-login
+brodar hyperagent-status
+```
+
+`hyperagent-login` invokes the OAuth flow with `--no-browser`, prints an authorization link and binds Brodar to the saved connection. Open the link in your browser and approve it. Over SSH, follow the CLI's local callback instructions; if the browser cannot reach the remote localhost callback, paste the final callback URL into the CLI's callback prompt. That URL contains a temporary authorization code: enter it only into your trusted login terminal. No token/API key needs copying into a prompt or repository.
+
+With exactly one agent named **Hyper Researcher**, Brodar selects it automatically. Otherwise `hyperagent-status` lists available IDs; select the intended one:
+
+```sh
+brodar hyperagent-status --agent-id YOUR_RESEARCHER_AGENT_ID
+```
+
+Use its Hyperagent **agent ID**, not its Telegram username. `hyperagent-status` checks access/discovery; it does not launch paid research or prove every connected service works.
+
+For **standalone interactive Codex** usage, `codex mcp login hyperagent --no-browser` and `codex mcp list` are the normal client commands. For Brodar, use `brodar hyperagent-login` as above: a generic MCP login alone does not establish Brodar's saved binding. The helper references the canonical Codex OAuth record rather than copying rotating refresh credentials.
+
+### 3. Enable the connection in Brodar
+
+```sh
+brodar configure research --plain
+# Answer yes, then confirm/paste the researcher agent ID.
+brodar service restart
+brodar hyperagent-status
+```
+
+This saves the selected agent and enables `hyperagent_mcp` in the external instance profile. It does not start a research run. For another instance, add `--profile /path/profile.json` to **each** Brodar command. Use the actual process manager's restart command if running under systemd.
+
+### 4. Ask for research
+
+In the owner DM or an approved group, for example:
+
+> brodar, ask the research agent to compare these sources and summarize this YouTube video: [link]. include timestamps where available, source links, disagreements and anything it couldn't access.
+
+Brodar's `delegate_research` tool queues a durable task and returns immediately. Background code creates a Hyperagent thread, polls its status and brings the completed report back to the **originating chat/topic**, where Brodar continues. The conversation need not sit in an inference loop while the researcher works. `research_tasks` exposes scoped status; `research_follow_up` continues the same thread when substantive details are missing. Task deadlines and bounded follow-ups prevent endless agent conversations. Open the research thread in Hyperagent to inspect its full tool trail.
+
+The host currently calls only `list_agents`, `create_thread`, `get_thread` and `send_message`. It does not expose all Hyperagent account/approval tools directly to the Telegram brain. Cloud tools run inside the configured researcher; they are not newly installed local Brodar tools.
+
+### Troubleshooting or disabling
+
+- **Research unavailable:** run `brodar hyperagent-login`, check `brodar hyperagent-status`, enable with `brodar configure research`, then restart.
+- **Agent listed but invocation rejected:** check the researcher's execution mode and MCP/integration access policy in Hyperagent.
+- **Service/video/post unavailable:** connect and attach the required app, inspect its granted actions and report actual access limits rather than assuming the connector can fetch it.
+- **Work still running:** open the Hyperagent thread; completion is asynchronous. Do not repeatedly resubmit a possibly accepted task.
+- **Disable research:** `brodar configure research`, answer no, then restart. Revoke the client under Hyperagent **Settings → MCP access** if you also want to revoke its grant.
+
 ## Run, stop and open the TUI
 
 | Goal | Command |
@@ -230,6 +303,7 @@ For another instance, add the same profile path to every command: `brodar login 
 | Change model/brain | `brodar configure brain`, then restart |
 | Sign in to Codex | `brodar login codex` |
 | Sign in to Claude Code | `brodar login claude` |
+| Connect optional researcher | `brodar hyperagent-login`, then `brodar configure research` |
 | All commands and flags | `brodar --help` or `brodar -h` |
 | Service command help | `brodar service --help` |
 | Installer help before any environment exists | `sh install.sh --help` |
