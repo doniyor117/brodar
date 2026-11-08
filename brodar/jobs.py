@@ -22,7 +22,7 @@ def input_requests(batch):
         message=row['payload'].get('message') or row['payload'].get('edited_message') or {}
         sender=message.get('from') or {}
         if (not sender.get('id') or sender.get('is_bot') or message.get('sender_chat') or
-                message.get('forward_origin') or message.get('forward_from')):continue
+                message.get('forward_origin') or message.get('forward_from') or message.get('forward_sender_name') or message.get('edit_date')):continue
         result.append(InputRequest(str(row['message_id']),sender['id'],message.get('text') or message.get('caption') or '',(message.get('reply_to_message') or {}).get('message_id')))
     return result
 

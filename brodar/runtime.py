@@ -32,6 +32,7 @@ from .artifacts import Artifacts
 from .recovery import ConsumerLease
 from .telegram_context import ordinary_message,public_payload,describe_message,addressed
 from .presence import TypingPresence
+from .telegram_context import FollowupAffinity
 from .moderation import requests as moderation_requests
 from .jobs import Reminders,input_requests,dispatch_reminder
 
@@ -99,9 +100,10 @@ class Conversation:
         self.semaphore=semaphore
         self.presence=presence
         self._saved_session=None
-        self.broker=ToolBroker(store,bot,embeddings=embeddings,artifacts=Artifacts(store,objects) if objects else None,
+        self.broker=ToolBroker(store,bot,embeddings=embeddings,artifacts=Artifacts(store,objects,root=cfg.runtime_dir/"files",temp_budget=getattr(cfg,"temp_budget_bytes",500_000_000),retained_budget=getattr(cfg,"retained_budget_bytes",1_000_000_000),idle_seconds=getattr(cfg,"temp_idle_seconds",604800)),
                                delivery_guard=delivery_guard,owner_ids=getattr(cfg,'owner_ids',()))
         self.broker.before_final_delivery=self._stop_typing
+        self.broker.on_activity=self._resume_typing
         self.broker.recall_timeout=getattr(cfg,'recall_timeout_seconds',2.0)
         self.mcp=ScopedMcpServer(self.broker)
         self.shared_group=None
@@ -125,6 +127,14 @@ class Conversation:
         self.root=cfg.runtime_dir/'providers'/cfg.brain/key
         from .commands import CommandGateway
         self.broker.commands=CommandGateway(cfg.runtime_dir/'workspaces'/key)
+        from .skills import LIBRARY
+        skill_root=self.broker.commands.root/'owner'/'skills'
+        if skill_root not in LIBRARY.roots:LIBRARY.roots.append(skill_root)
+
+    async def _resume_typing(self,cap=None):
+        if self.presence and self._presence_generation and (cap is None or self.broker.capability is cap):
+            if self._presence_generation==self.presence.generation(self.store.scope):
+                self.presence.start(self.store.scope)
 
     async def _stop_typing(self,cap=None):
         if self.presence and (cap is None or self.broker.capability is cap):
@@ -211,6 +221,8 @@ class Conversation:
             if cap is None:
                 await self.store.finish_inputs([r['id'] for r in batch],retry=True)
                 return
+            if cap.requester_id in getattr(self.cfg,'owner_ids',()) and any(request.actor!=cap.requester_id for request in input_requests(batch)):
+                await self.store.finish_inputs([r['id'] for r in batch],retry=True);self.wake.set();return
             accepted=await self.brain.steer(authorized(envelope(messages),cap))
             if accepted:
                 if self.presence:self._presence_generation=max(self._presence_generation or 0,self.presence.for_inputs(self.store.scope,[r.get('update_id') for r in batch]))
@@ -352,6 +364,17 @@ class Conversation:
         prep_started=time.monotonic()
         batch=await self.store.claim_inputs()
         if not batch:return
+        first=(batch[0]['payload'].get('message') or {})
+        actor=(first.get('from') or {}).get('id')
+        if actor in getattr(self.cfg,"owner_ids",()):
+            owner_batch=[];deferred=[]
+            for row in batch:
+                message=row['payload'].get('message') or {}
+                if (message.get('from') or {}).get('id')==actor and not message.get('sender_chat'):owner_batch.append(row)
+                else:deferred.append(row)
+            if deferred:
+                await self.store.finish_inputs([r['id'] for r in deferred],retry=True);self.wake.set()
+            batch=owner_batch
         self._ambient_first=None;self._ambient_last=None
         self.inflight=list(batch)
         if self.presence:
@@ -372,8 +395,13 @@ class Conversation:
         if work['status'] in {'done','cancelled'}:
             await self.store.finish_inputs([r['id'] for r in batch],error='cancelled' if work['status']=='cancelled' else None)
             return
-        self.broker.begin(TurnCapability(self._turn_id,requester_id=requester,peer_bot_id=peer),moderation_requests=moderation_requests(batch,getattr(self.bot,'username',None)),
+        local_operator=bool(getattr(self.broker,'operator_session',False) and batch[0]['payload'].get('terminal'))
+        self.broker.begin(TurnCapability(self._turn_id,requester_id=requester,peer_bot_id=peer,mode='operator' if local_operator else 'conversation'),moderation_requests=moderation_requests(batch,getattr(self.bot,'username',None)),
                           requests=input_requests(batch),research_context=[r['payload']['internal_research']['task_id'] for r in batch if r['payload'].get('internal_research')])
+        if local_operator:
+            from .jobs import InputRequest
+            rows=await self.store.history_get([str(row['message_id']) for row in batch])
+            self.broker.accept_requests([InputRequest(str(row['id']),None,row['content']) for row in rows])
         await self.materialize(batch)
         if self._cancelled:
             await self.store.finish_inputs([r['id'] for r in self.inflight],error='cancelled',job_id=self._turn_id)
@@ -412,10 +440,10 @@ class Conversation:
         try:
             for continuation in range(4):
                 if self._cancelled:break
+                await self._resume_typing(self.broker.capability)
                 self._accept_steer=True
                 provider_started=time.monotonic()
                 outcome=await asyncio.wait_for(self.brain.turn(authorized(payload,self.broker.capability)),timeout=600)
-                if outcome.action in {'stop','skip'}:await self._stop_typing()
                 log.warning('Foreground provider turn seconds=%.2f continuation=%s status=%s',time.monotonic()-provider_started,continuation,outcome.status)
                 async with self._steer_lock:self._accept_steer=False
                 if self.brain.session_id and self.brain.session_id!=self._saved_session and not getattr(self.brain,'shared',False):
@@ -488,6 +516,13 @@ class Conversation:
 
 
 async def run(cfg):
+    from .prompt_files import configure
+    configure(getattr(cfg,"prompt_dir",None))
+    from .redaction import register_secrets
+    from urllib.parse import urlsplit,unquote
+    register_secrets(cfg.database_url,cfg.telegram_token,cfg.google_key,unquote(urlsplit(cfg.database_url).password or ""))
+    if cfg.storage_config and cfg.storage_config.exists():
+        stored=json.loads(cfg.storage_config.read_text());register_secrets(stored.get("access_key"),stored.get("secret_key"))
     cfg.runtime_dir.mkdir(mode=0o700,parents=True,exist_ok=True)
     import fcntl
     lock=(cfg.runtime_dir/'instance.lock').open('w')
@@ -504,7 +539,12 @@ async def run(cfg):
     jobs_db=Postgres(cfg.database_url)
     embeddings=GeminiEmbeddings(cfg.google_key) if cfg.google_key else None
     bot=Bot(cfg.telegram_token)
+    cleanup_worker=None
+    cleanup_db=None
+    control_server=None
+    terminal_session=None
     presence=TypingPresence(bot)
+    followups=FollowupAffinity(getattr(cfg,"followup_seconds",120))
     objects=ObjectStore.from_file(cfg.storage_config)
     from .approvals import Approvals
     approval_service=Approvals(approval_db,bot,cfg)
@@ -513,6 +553,8 @@ async def run(cfg):
     from .coordination import LoopGuard
     loop_guard=LoopGuard(coordination_db,cfg.instance_id)
     approval_service.allowed_chats=access.audiences
+    from .owner_tools import OwnerJobs
+    owner_jobs=OwnerJobs(cfg,bot,lambda:lease)
     conversations={}
     creating={}
     dispatch_tasks={}
@@ -537,8 +579,8 @@ async def run(cfg):
         result=row.get('result') or {'report':row.get('error_code') or 'research_failed'}
         report=result.get('report','')
         artifact=None
-        if len(report)>12000 and objects:
-            artifact=await Artifacts(LearningStore(research_events_db,scope,lease_owner=lease.owner),objects).put(
+        if len(report)>12000:
+            artifact=await Artifacts(LearningStore(research_events_db,scope,lease_owner=lease.owner),objects,root=cfg.runtime_dir/"files",temp_budget=cfg.temp_budget_bytes,retained_budget=cfg.retained_budget_bytes,idle_seconds=cfg.temp_idle_seconds).put(
                 turn_id=str(row['id']),operation_id=f'research-result:{row["generation"]}:{row["result_version"]}',filename=f'research-{row["id"]}.md',
                 mime='text/markdown',body=report.encode(),request_hash=hashlib.sha256(report.encode()).hexdigest(),metadata={'source':'hyperagent','task_id':str(row['id'])})
         content=render('research-result.md',task_id=str(row['id']),status=row['status'],brief=row['brief'],
@@ -577,6 +619,7 @@ async def run(cfg):
                 conversation.broker.audit_store=LearningStore(audit_db,scope,lease_owner=lease.owner)
                 conversation.shared_group=shared_groups if scope.chat_id<0 else None
                 conversation.broker.approvals=approval_service
+                conversation.broker.owner_jobs=owner_jobs
                 conversation.broker.router=router
                 conversation.broker.loop_guard=loop_guard
                 conversation.broker.research=research
@@ -647,9 +690,13 @@ async def run(cfg):
     try:
         await bot.initialize()
         me=await bot.get_me()
+        from .maintenance import cleanup_files
+        cleanup_db=Postgres(cfg.database_url)
+        cleanup_worker=asyncio.create_task(cleanup_files(cfg,cleanup_db,me.id,lambda:bool(owner_jobs.tasks) or any(c.inflight for c in conversations.values())),name="brodar-file-cleanup")
         info=await bot.get_webhook_info()
         if info.url:raise RuntimeError('This bot has a webhook; use a separate test token or explicitly remove the webhook first')
         await access.load()
+        await owner_jobs.recover(db,[Scope(me.id,chat,instance_id=cfg.instance_id) for chat in access.audiences()])
         await loop_guard.register()
         lease=ConsumerLease(db,me.id)
         await lease.acquire()
@@ -663,6 +710,48 @@ async def run(cfg):
                     parent_task.cancel()
                     return
         heartbeat=asyncio.create_task(renew_lease(),name='brodar-lease')
+        from .terminal import TerminalSession
+        from .control import ControlServer
+        terminal_session=TerminalSession(cfg,Postgres(cfg.database_url),me.id,semaphore,objects,owner_jobs=owner_jobs,router=router,approvals=approval_service)
+        started_at=time.time()
+        async def operator_control(method,params):
+            if method=='status':
+                return {'running':True,'started_at':started_at,'brain':cfg.brain,'model':cfg.model,
+                    'groups':len(access.groups),'active_conversations':sum(bool(c.inflight) for c in conversations.values()),
+                    'typing_conversations':len(presence.tasks),'owner_jobs':len(owner_jobs.tasks),
+                    'temp_budget_bytes':cfg.temp_budget_bytes,'retained_budget_bytes':cfg.retained_budget_bytes,
+                    'backup_interval_seconds':cfg.backup_interval_seconds,'research':cfg.research_transport,
+                    'model_tested':False}
+            if method=='groups':return [{'chat_id':chat} for chat in sorted(access.groups)]
+            if method=='chat_send':return await terminal_session.send(str(params.get('text','')))
+            if method=='chat_read':return terminal_session.bot.output
+            if method=='skills':
+                from .skills import LIBRARY
+                return await LIBRARY.list(str(params.get('query','')),limit=100)
+            if method=='settings':return {'brain':cfg.brain,'model':cfg.model,'timezone':cfg.timezone,'aliases':cfg.aliases,'prompt_dir':str(cfg.prompt_dir),'profile':str(cfg.profile_path)}
+            if method in {'jobs','memory'}:
+                def fetch():
+                    result=[]
+                    for chat in sorted(access.audiences()):
+                        scope=Scope(me.id,chat,instance_id=cfg.instance_id)
+                        with db.transaction(scope.audience,readonly=True) as c:
+                            if method=='jobs':c.execute('SELECT id,kind,status,updated_at FROM brodar_v2.jobs WHERE audience=%s ORDER BY updated_at DESC LIMIT 10',(scope.audience,))
+                            else:c.execute('SELECT path,revision,updated_at FROM brodar_v2.memory_documents WHERE audience=%s ORDER BY updated_at DESC LIMIT 10',(scope.audience,))
+                            from .store import records
+                            result.extend(dict(row,chat_id=chat) for row in records(c))
+                    return result[:100]
+                return await db.run(fetch)
+            if method=='logs':
+                from .redaction import scrub
+                path=cfg.runtime_dir/'service.log'
+                return {'text':scrub(path.read_text(errors='replace')[-20000:]) if path.exists() else ''}
+            if method=='connections':
+                return {'provider':cfg.brain,'auth':'configured; use doctor for validation','database':bool(cfg.database_url),'retained_storage':objects is not None,'research':cfg.research_transport,'live_model_check':'unverified'}
+            raise ValueError('Unknown operator method')
+        control_server=ControlServer(cfg,operator_control);await control_server.start()
+        from .profile import atomic_private
+        atomic_private(cfg.runtime_dir/'status.json',json.dumps(await operator_control('status',{})))
+
         def cursor():
             with db.transaction(readonly=True) as c:
                 c.execute('SELECT next_update_id FROM brodar_v2.poll_state WHERE bot_id=%s',(me.id,))
@@ -726,7 +815,9 @@ async def run(cfg):
                     sender=message.from_user if message.sender_chat is None else None
                     scope=Scope(me.id,message.chat_id,message.message_thread_id or 0,cfg.instance_id)
                     text,service=describe_message(raw_message)
-                    direct=addressed(raw_message,me.id,me.username)
+                    direct=addressed(raw_message,me.id,me.username,getattr(cfg,"aliases",None))
+                    if sender and not sender.is_bot and not service:
+                        direct=followups.classify(scope,sender.id,text,direct=direct)
                     if not service and not (sender and sender.is_bot):learning.preempt()
                     if direct and not service and not (sender and sender.is_bot):presence.start(scope,new_work=True,update_id=update.update_id)
                     if message.edit_date is not None and scope.conversation in conversations:
@@ -748,6 +839,7 @@ async def run(cfg):
                         if text.split('@',1)[0].strip()=='/cancel' and sender:
                             conversation=await get_conversation(scope)
                             await conversation.cancel(sender.id)
+                            await owner_jobs.cancel_actor(store,sender.id)
                             await store.finish_inputs([iid])
                         elif sender and sender.is_bot:
                             if sender.id!=me.id and direct and text.strip().upper() not in {'[SILENT]','SILENT'} and await loop_guard.incoming(await loop_guard.resolve(raw_message.get('from') or {},cfg.research_bot_username),scope.chat_id,text):
@@ -769,6 +861,12 @@ async def run(cfg):
                         if c.fetchone() is None:raise PermissionError('Consumer lease expired before cursor commit')
                 if not persisted:await db.run(advance)
     finally:
+        if control_server:await control_server.close()
+        if terminal_session:await terminal_session.close();await terminal_session.db.close()
+        await owner_jobs.close()
+        if cleanup_worker:
+            cleanup_worker.cancel();await asyncio.gather(cleanup_worker,return_exceptions=True)
+        if cleanup_db:await cleanup_db.close()
         if research_worker:
             research_worker.cancel()
             await asyncio.gather(research_worker,return_exceptions=True)

@@ -1,0 +1,7 @@
+# Exact historical findings reviewed on 2026-11-08; no blanket test/directory exclusions.
+# Four synthetic scrubber fixtures; one English research-prompt false positive.
+e37b634b1770d6b8ecb65e9c03079b8d459dced5:prompts/hyperresearcher-system.md:generic-api-key:59
+851c3f6fe7632bd259366cde902d4b3cca0c6494:tests/test_secrets_scrubber.py:generic-api-key:76
+7c29105223a393ddb70aae1dffe80002987808fd:tests/test_secrets_scrubber.py:github-pat:29
+7c29105223a393ddb70aae1dffe80002987808fd:tests/test_secrets_scrubber.py:jwt:51
+7c29105223a393ddb70aae1dffe80002987808fd:tests/test_secrets_scrubber.py:slack-bot-token:45

@@ -34,15 +34,17 @@ async def setup_storage(api_key,project,branch,destination,*,client=None):
                 if buckets[name].get('access_level')!='private':raise ValueError('An existing Brodar bucket is public; use a private bucket')
             else:await request('POST','/buckets',{'name':name,'access_level':'private'})
         if existing:return {'storage_config':str(path),'private_buckets':names,'credential_reused':True}
+        from .profile import atomic_private
+        pending=path.with_name(path.name+'.credential-pending')
+        if pending.exists():raise RuntimeError('Previous credential creation outcome unknown; inspect/revoke the unused Brodar credential before retrying')
+        atomic_private(pending,'credential creation pending; no credential values stored here\n')
         credential=await request('POST','/credentials',{'scopes':['storage:read','storage:write'],
                                                      'principal_type':'user','name':'brodar-object-storage'})
         config={'endpoint':state['s3_endpoint'],'region':state['region'],
                 'access_key':credential['token_id'],'secret_key':credential['s3_secret_access_key'],
                 'artifacts_bucket':names[0],'backups_bucket':names[1]}
-        path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-        with os.fdopen(fd,'w') as f:
-            json.dump(config,f,indent=2);f.flush();os.fsync(f.fileno())
+        atomic_private(path,json.dumps(config,indent=2))
+        pending.unlink(missing_ok=True)
         return {'storage_config':str(path),'private_buckets':names,'credential_reused':False,'credentials_printed':False}
     finally:
         if own:await client.aclose()

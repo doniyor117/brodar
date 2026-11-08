@@ -3,6 +3,12 @@
 import re
 from hamroh.utils.secrets_scrubber import scrub as upstream_scrub
 
+_KNOWN=set()
+
+def register_secrets(*values):
+    for value in values:
+        if isinstance(value,str) and len(value)>=8:_KNOWN.add(value)
+
 _EXTRA=(re.compile(r'\bAIza[A-Za-z0-9_-]{35}\b'),
         re.compile(r'\bhat_[A-Za-z0-9_-]{16,}\b'),
         # Telegram URLs prefix tokens with "bot", so a leading word boundary
@@ -12,6 +18,7 @@ _EXTRA=(re.compile(r'\bAIza[A-Za-z0-9_-]{35}\b'),
 
 
 def scrub(text):
+    for value in sorted(_KNOWN,key=len,reverse=True):text=text.replace(value,"[REDACTED]")
     text=upstream_scrub(text)
     for pattern in _EXTRA:text=pattern.sub('[REDACTED]',text)
     return text

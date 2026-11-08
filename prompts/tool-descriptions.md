@@ -191,3 +191,29 @@ Use native current-chat actions with structured parameters. location: latitude/l
 ## telegram_media_lookup
 
 Inspect Telegram media without exposing bot-token download URLs. kind=sticker_preview accepts a pack short name or https://t.me/addstickers/PACK and returns an actual numbered image grid plus matching index/file_id metadata, up to 20 stickers per page. Inspect this image to select stickers by text or artwork; follow next_offset to inspect the rest. Animated/video stickers use available thumbnails only, and missing/broken previews are marked unavailable. Preview images are transient, with no durable upload. kind=sticker_set returns only paginated sticker file_ids, emoji and format metadata, not artwork. Send the selected real file_id with telegram_send_media(kind=sticker,media=file:ID). kind=file returns safe metadata for an actual file_id. kind=import_file downloads that Telegram file into scoped durable storage (cloud download limit 20 MB), returning an artifact to inspect with artifact_read; supported images become visual input. kind=custom_emoji accepts up to 100 comma-separated custom emoji IDs. Keep useful pack names/selected file IDs in scoped Neon context notes when helpful; a bot has no human client's installed-sticker tray.
+
+
+## telegram_send_sticker
+Send the exact inspected sticker using its short selection_ref from sticker_preview/sticker_candidate. The host resolves its file ID and returns the actual pack/index. Use the returned index when reporting which sticker was sent. Expired selections require a new preview.
+
+
+## artifact_retain
+Permanently keep a permitted file only after a fresh explicit keep/save request. Pass its archive request_message_id and artifact_id. Normal attachments, downloads, generated files and deliveries are temporary local files, not permanent saves. Return success only after validated durable storage succeeds.
+
+
+## owner_execute
+For a fresh authenticated owner request, run Python, shell, Git, package tools, downloads or skill scripts in an owner workspace as a tracked asynchronous host job. Supply request_message_id, argv and operation_id. Normal safe installs need no approval; sensitive/risky exact commands require owner_command_approval. Credentials/main prompts/catastrophic commands remain denied. Return job ID immediately; completion reports to the origin. Native provider shell remains unavailable to groups.
+
+## owner_command_approval
+Request owner-DM approval for an exact sensitive/risky host command, tied to a fresh owner request. Credential access and catastrophic operations cannot be approved.
+
+## owner_job_status
+Fetch a scoped owner job's actual output/status or cancel it, authorized by a fresh owner request. Do not claim a queued job has finished. Avoid disclosing private results to other groups.
+
+
+## owner_skill
+Install/update/remove a skill for a fresh owner request as an asynchronous host job. Use a public GitHub HTTPS source and the directory containing SKILL.md; source/ref/resolved commit are recorded. Skill installation does not execute its scripts. Read the installed instructions before running scripts through owner_execute.
+
+
+## owner_skill_run
+Run a script from any discovered Codex/Claude skill for a fresh authenticated owner request. First read SKILL.md, then supply skill_id, relative script resource, arguments and operation_id. The host copies the checked package into the owner's workspace without auth/plugin configuration and runs it as a tracked job. Supported script types: Python, shell, JavaScript.

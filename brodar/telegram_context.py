@@ -5,12 +5,12 @@ import re
 _NAMES=re.compile(r'(?<!\w)(?:brodar(?:\s+simon)?|simon(?:\s+bro)?|samy)(?!\w)',re.I)
 
 
-def addressed(message,bot_id,username):
+def addressed(message,bot_id,username,aliases=None):
     text=message.get('text') or message.get('caption') or ''
     mention=bool(username and re.search(r'@'+re.escape(username)+r'(?!\w)',text,re.I))
     reply=(message.get('reply_to_message') or {}).get('from') or {}
     return bool((message.get('chat') or {}).get('type')=='private' or mention or
-                reply.get('id')==bot_id or _NAMES.search(text))
+                reply.get('id')==bot_id or (any(re.search(r'(?<!\w)'+re.escape(name)+r'(?!\w)',text,re.I) for name in aliases) if aliases is not None else _NAMES.search(text)))
 
 
 def ordinary_message(message):
@@ -56,3 +56,22 @@ def describe_message(message):
             'video_chat_started','video_chat_ended','video_chat_scheduled','message_auto_delete_timer_changed']
     active=[key for key in fields if message.get(key)]
     return '[telegram service event: '+(', '.join(active) or 'message without text/media')+']',True
+
+
+class FollowupAffinity:
+    """Short-lived conversational affinity, never an authorization source."""
+    def __init__(self,seconds=120,clock=None):
+        import time
+        self.seconds=seconds;self.clock=clock or time.monotonic;self.entries={}
+
+    def classify(self,scope,actor,text,*,direct=False):
+        key=(scope.conversation,actor);now=self.clock()
+        until=self.entries.get(key,0)
+        likely=len(text)<600 and bool(re.search(r"^(?:try|then|send|make|do |again|no\b|yes\b|ok\b|nah\b|why|what|which|how|can |could |please|alright|don't|stop|davom|qayta|yana|нет|давай|ещ[её])|\?\s*$",text.strip(),re.I))
+        result=direct or (until>now and likely)
+        if result:
+            self.entries[key]=now+self.seconds
+            if len(self.entries)>1024:
+                self.entries={k:v for k,v in self.entries.items() if v>now}
+                while len(self.entries)>1024:self.entries.pop(next(iter(self.entries)))
+        return result

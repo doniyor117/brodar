@@ -5,6 +5,9 @@ import math
 import re
 import asyncio
 import io
+import secrets
+import time
+from collections import OrderedDict
 from uuid import UUID
 from urllib.parse import urlsplit
 
@@ -39,6 +42,12 @@ async def sticker_preview(broker,identifier,offset=0):
     if offset<0:raise ValueError('Sticker offset must be nonnegative')
     pack=await broker.bot.get_sticker_set(sticker_set_name(identifier))
     selected=pack.stickers[offset:offset+20]
+    cache=getattr(broker,'_sticker_cache',None)
+    if cache is None:cache=broker._sticker_cache=OrderedDict()
+    now=time.monotonic()
+    for key in list(cache):
+        if cache[key]['expires']<now:del cache[key]
+    preview_id=secrets.token_urlsafe(9)
     if not selected:raise ValueError('No stickers at this offset')
     semaphore=asyncio.Semaphore(4)
 
@@ -48,8 +57,13 @@ async def sticker_preview(broker,identifier,offset=0):
         if broker.capability is not cap:raise PermissionError('Sticker preview turn ended')
 
     async def fetch(index,sticker):
+        ref=secrets.token_urlsafe(9)
         entry={'index':index,'file_id':sticker.file_id,'emoji':sticker.emoji,
+               'selection_ref':ref,'preview_id':preview_id,'file_unique_id':getattr(sticker,'file_unique_id',''),
                'preview':'thumbnail' if sticker.is_animated or sticker.is_video else 'artwork'}
+        cache[ref]={'entry':entry,'name':pack.name,'sticker':sticker,'expires':now+86400,
+                    'audience':broker.store.scope.audience,'snapshot':tuple(s.file_id for s in pack.stickers)}
+        while len(cache)>2560:cache.popitem(last=False)
         target=getattr(sticker,'thumbnail',None) if sticker.is_animated or sticker.is_video else sticker
         if target is None:return dict(entry,preview='unavailable'),None
         async with semaphore:
@@ -94,7 +108,7 @@ async def sticker_preview(broker,identifier,offset=0):
 
     png=await asyncio.to_thread(render)
     check()
-    return {'name':pack.name,'title':pack.title,'total':len(pack.stickers),
+    return {'preview_id':preview_id,'name':pack.name,'title':pack.title,'total':len(pack.stickers),
             'next_offset':offset+20 if len(pack.stickers)>offset+20 else None,
             'stickers':[entry for entry,_ in images]},png
 
@@ -298,3 +312,40 @@ async def lookup(broker,kind,identifier,offset=0):
         if not 1<=len(identifiers)<=100 or any(not value.isdigit() for value in identifiers):raise ValueError('Use 1..100 comma-separated custom emoji IDs')
         return [{'custom_emoji_id':s.custom_emoji_id,'file_id':s.file_id,'emoji':s.emoji} for s in await broker.bot.get_custom_emoji_stickers(identifiers)]
     raise ValueError('Choose file, import_file, sticker_set or custom_emoji')
+
+
+def selected_sticker(broker,ref):
+    entry=getattr(broker,'_sticker_cache',{}).get(ref)
+    if not entry or entry['expires']<time.monotonic() or entry['audience']!=broker.store.scope.audience:
+        raise ValueError('Sticker selection expired or belongs to another audience; preview the pack again')
+    return entry
+
+
+async def sticker_candidate(broker,ref):
+    cap=broker.require();cached=selected_sticker(broker,ref);sticker=cached['sticker']
+    target=getattr(sticker,'thumbnail',None) if sticker.is_animated or sticker.is_video else sticker
+    if target is None:raise ValueError('No candidate artwork is available')
+    async with asyncio.timeout(15):
+        file=await broker.bot.get_file(target.file_id)
+        if (file.file_size or 0)>2_000_000:raise ValueError('Preview exceeds 2 MB')
+        body=bytes(await file.download_as_bytearray())
+    if len(body)>2_000_000:raise ValueError('Preview exceeds 2 MB')
+    if broker.capability is not cap:raise PermissionError('Sticker inspection turn ended')
+    def render():
+        from PIL import Image
+        with Image.open(io.BytesIO(body)) as image:
+            if image.width*image.height>4_000_000:raise ValueError('Preview dimensions too large')
+            image=image.convert('RGBA');image.thumbnail((1024,1024))
+            output=io.BytesIO();image.save(output,format='PNG');return output.getvalue()
+    return dict(cached['entry'],name=cached['name']),await asyncio.to_thread(render)
+
+
+async def send_selected_sticker(broker,ref,operation,reply_to=None,final=True):
+    cap=broker.require(visible=True);cached=selected_sticker(broker,ref)
+    pack=await broker.bot.get_sticker_set(cached['name'])
+    if tuple(s.file_id for s in pack.stickers)!=cached['snapshot']:
+        raise ValueError('Sticker pack changed; preview it again before selecting')
+    if broker.capability is not cap:raise PermissionError('Sticker send turn ended')
+    entry=cached['entry']
+    receipt=await send_media(broker,'sticker','file:'+entry['file_id'],'',operation,reply_to=reply_to,final=final)
+    return dict(receipt,selection_ref=ref,pack=cached['name'],index=entry['index'],file_unique_id=entry['file_unique_id'])

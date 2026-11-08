@@ -141,7 +141,7 @@ class ToolBroker:
     def require(self,*,visible=False):
         cap=self.capability
         if cap is None:raise PermissionError('No active turn')
-        if visible and cap.mode!='conversation':
+        if visible and cap.mode!='conversation' and not (cap.mode=='operator' and getattr(self,'operator_session',False) and self.store.scope.audience.startswith('terminal:')):
             raise PermissionError('Reflection can update context, not post in chat')
         return cap
 
@@ -247,6 +247,8 @@ class ToolBroker:
                 if final and self.before_final_delivery:await self.before_final_delivery(cap)
                 sent=await send()
             except (BadRequest,Forbidden,RetryAfter,DeliveryRejected) as exc:
+                activity=getattr(self,'on_activity',None)
+                if activity:await activity(cap)
                 await self.store.delivery_finish(receipt['id'],'failed',{'error':type(exc).__name__})
                 raise DeliveryRejected(f'Telegram rejected delivery ({type(exc).__name__})') from None
             except NetworkError:

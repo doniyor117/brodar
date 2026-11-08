@@ -6,7 +6,7 @@ import secrets
 from .postgres import Postgres
 
 TABLES=('messages','inbox','memory_documents','memory_revisions','memory_sources',
-        'embeddings','sessions','deliveries','jobs','poll_state','reflection_state','maintenance_runs','approvals','group_access','bot_exchanges','bot_aliases','bot_reservations','research_tasks','forgotten_sources','tool_calls','artifacts','audience_registry')
+        'embeddings','sessions','deliveries','jobs','poll_state','reflection_state','maintenance_runs','approvals','group_access','bot_exchanges','bot_aliases','bot_reservations','research_tasks','forgotten_sources','tool_calls','artifacts','audience_registry','storage_usage')
 
 
 async def provision_runtime(db:Postgres,admin_uri:str,*,role:str,password:str|None=None):
@@ -33,6 +33,9 @@ async def provision_runtime(db:Postgres,admin_uri:str,*,role:str,password:str|No
             for table in TABLES:
                 c.execute(f'GRANT SELECT,INSERT,UPDATE,DELETE ON brodar_v2.{table} TO "{role}"')
     await db.run(provision)
+    return runtime_uri(admin_uri,role,password)
+
+
+def runtime_uri(admin_uri,role,password):
     u=urlsplit(admin_uri)
-    uri=urlunsplit((u.scheme,quote(role,safe='')+':'+quote(password,safe='')+'@'+u.netloc.split('@',1)[1],u.path,u.query,u.fragment))
-    return uri
+    return urlunsplit((u.scheme,quote(role,safe='')+':'+quote(password,safe='')+'@'+u.netloc.split('@',1)[1],u.path,u.query,u.fragment))

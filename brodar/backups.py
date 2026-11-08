@@ -20,7 +20,7 @@ from .store import records
 SCOPED = ('messages','memory_documents','memory_revisions','memory_sources',
           'embeddings','inbox','sessions','deliveries','jobs','reflection_state','maintenance_runs','approvals','group_access','bot_exchanges','bot_aliases','bot_reservations','research_tasks',
           'forgotten_sources','tool_calls','artifacts')
-GLOBAL = ('audience_registry','poll_state')
+GLOBAL = ('audience_registry','poll_state','storage_usage')
 FORMAT = 1
 
 
@@ -65,6 +65,10 @@ async def snapshot(db):
                     'global':{'audience_registry':registry},'audiences':{}}
             c.execute('SELECT * FROM brodar_v2.poll_state')
             result['global']['poll_state']=records(c)
+            c.execute('SELECT * FROM brodar_v2.storage_usage ORDER BY kind')
+            result['global']['storage_usage']=records(c)
+            for usage in result['global']['storage_usage']:
+                if usage['kind']=='temporary':usage['bytes']=0
             c.execute('SELECT version,checksum FROM brodar_v2.schema_migrations ORDER BY version')
             result['migrations']=records(c)
             for row in registry:
@@ -74,6 +78,8 @@ async def snapshot(db):
                                table+' t WHERE audience=%s)' for table in SCOPED)
                 c.execute('SELECT jsonb_build_object('+pairs+')',tuple(audience for _ in SCOPED))
                 result['audiences'][audience]=c.fetchone()[0]
+                for item in result['audiences'][audience]['artifacts']:
+                    if item.get('storage_kind')=='temporary':item['state']='expired'
             return result
     return await db.run(op)
 
@@ -85,15 +91,19 @@ def counts(data):
     return result
 
 
-async def backup(db, objects, *, key_file=None):
+async def backup(db, objects, *, key_file=None,budget_bytes=2_000_000_000):
     key=await recovery_key(db,key_file,create=True)
     cipher=Fernet(key['key'].encode())
     data=await snapshot(db)
     backup_id=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid4().hex[:12]
     prefix='snapshots/'+backup_id
     assets={}
+    existing=await objects.inventory(bucket=objects.backups_bucket,prefix='snapshots/')
+    estimated=sum(row['bytes'] for row in existing)+len(encode(data))*2+sum(a['size_bytes']*2 for t in data['audiences'].values() for a in t['artifacts'] if a.get('storage_kind','retained')=='retained')
+    if estimated>budget_bytes:raise ValueError('Backup budget reached; inspect retained snapshots before increasing the budget')
     for tables in data['audiences'].values():
         for artifact in tables['artifacts']:
+            if artifact.get('storage_kind','retained')!='retained':continue
             digest=artifact['content_hash']
             if digest not in assets:
                 body=await objects.get(artifact['object_key'])
@@ -105,7 +115,7 @@ async def backup(db, objects, *, key_file=None):
     content=encode(data)
     encrypted=cipher.encrypt(gzip.compress(content,mtime=0))
     await objects.put(prefix+'/snapshot.fernet',encrypted,'application/octet-stream',bucket=objects.backups_bucket)
-    manifest={'format':FORMAT,'backup_id':backup_id,'key_id':key['id'],
+    manifest={'format':FORMAT,'backup_id':backup_id,'key_id':key['id'],'retention_managed':True,'pinned':False,
               'sha256':sha(content),'encrypted_sha256':sha(encrypted),'rows':counts(data),'objects':len(assets)}
     # Publish the manifest last: incomplete uploads are never listed as complete.
     await objects.put(prefix+'/manifest.json',encode(manifest),'application/json',bucket=objects.backups_bucket)
@@ -142,6 +152,7 @@ async def restore(db, objects, backup_id, *, key_file=None, source_objects=None)
     # harmless content-addressed objects and an empty database that can retry.
     for tables in data['audiences'].values():
         for artifact in tables['artifacts']:
+            if artifact.get('storage_kind','retained')!='retained':continue
             digest=artifact['content_hash']
             encrypted=await source.get(data['objects'][digest],bucket=source.backups_bucket,max_bytes=70_000_000)
             body=cipher.decrypt(encrypted)
@@ -170,6 +181,8 @@ async def restore(db, objects, backup_id, *, key_file=None, source_objects=None)
             insert('audience_registry',data['global']['audience_registry'])
             poll=[dict(row,lease_owner=None,lease_until=None) for row in data['global']['poll_state']]
             insert('poll_state',poll)
+            c.execute('DELETE FROM brodar_v2.storage_usage')
+            insert('storage_usage',data['global']['storage_usage'])
             for audience,tables in data['audiences'].items():
                 c.execute("SELECT set_config('brodar.audience',%s,true)",(audience,))
                 for table in SCOPED:
@@ -205,7 +218,36 @@ async def verify_restore(db,objects,expected,manifest):
         raise ValueError('Restored database content differs from the backup')
     for tables in actual['audiences'].values():
         for artifact in tables['artifacts']:
+            if artifact.get('storage_kind','retained')!='retained':continue
             body=await objects.get(artifact['object_key'])
             if sha(body)!=artifact['content_hash']:raise ValueError('Restored artifact checksum mismatch')
     return {'backup_id':manifest['backup_id'],'restored_rows':counts(actual),
             'objects_verified':manifest['objects'],'database_content_verified':True}
+
+
+async def prune_managed(db,objects,*,key_file=None,keep=2):
+    """Only new managed snapshots; legacy/pinned/incomplete objects stay untouched."""
+    rows=await objects.inventory(bucket=objects.backups_bucket,prefix='snapshots/')
+    managed=[]
+    for row in rows:
+        if row['key'].endswith('/manifest.json'):
+            value=json.loads(await objects.get(row['key'],bucket=objects.backups_bucket))
+            if value.get('retention_managed') and not value.get('pinned'):managed.append(value)
+    managed.sort(key=lambda row:row['backup_id'],reverse=True)
+    if len(managed)<=keep:return {'pruned':0}
+    # Fully validate every retained generation (snapshot and file bytes) before pruning.
+    for item in managed[:keep]:
+        data,manifest,cipher=await load_backup(db,objects,item['backup_id'],key_file=key_file)
+        for digest,key in data['objects'].items():
+            body=cipher.decrypt(await objects.get(key,bucket=objects.backups_bucket,max_bytes=70_000_000))
+            if sha(body)!=digest:raise ValueError('Backup object validation failed; nothing pruned')
+    count=0
+    for item in managed[keep:]:
+        prefix='snapshots/'+item['backup_id']+'/'
+        # Remove completion marker first. An interrupted prune cannot look restorable.
+        await objects.delete(prefix+'manifest.json',bucket=objects.backups_bucket)
+        for row in rows:
+            if row['key'].startswith(prefix) and not row['key'].endswith('/manifest.json'):
+                await objects.delete(row['key'],bucket=objects.backups_bucket)
+        count+=1
+    return {'pruned':count}

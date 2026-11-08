@@ -38,6 +38,12 @@ class ObjectStore:
             finally:stream.close()
         return await asyncio.to_thread(fetch)
 
+    async def inventory(self,*,bucket=None,prefix=""):
+        def scan():
+            pages=self.client.get_paginator("list_objects_v2").paginate(Bucket=bucket or self.bucket,Prefix=prefix)
+            return [{"key":row["Key"],"bytes":row["Size"]} for page in pages for row in page.get("Contents",[])]
+        return await asyncio.to_thread(scan)
+
     async def delete(self,key,*,bucket=None):
         await asyncio.to_thread(self.client.delete_object,Bucket=bucket or self.bucket,Key=key)
 

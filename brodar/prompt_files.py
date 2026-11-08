@@ -5,11 +5,19 @@ from pathlib import Path
 from string import Template
 import re
 
+OVERRIDES=None
+
+def configure(directory=None):
+    global OVERRIDES
+    OVERRIDES=Path(directory).resolve() if directory else None
+    load.cache_clear();section.cache_clear()
+
 SOURCE=Path(__file__).resolve().parent.parent/'prompts'
 
 @lru_cache(maxsize=128)
 def load(name):
     if Path(name).name!=name or not name.endswith('.md'):raise ValueError('Invalid prompt asset name')
+    if OVERRIDES and (OVERRIDES/name).is_file():return (OVERRIDES/name).read_text(encoding='utf-8').rstrip('\n')
     if (SOURCE/name).is_file():return (SOURCE/name).read_text(encoding='utf-8').rstrip('\n')
     alias={'brodar.md':'persona.md','brodar-harness.md':'harness.md'}.get(name,name)
     return files('brodar').joinpath('assets',alias).read_text(encoding='utf-8').rstrip('\n')

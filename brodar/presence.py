@@ -43,7 +43,7 @@ class TypingPresence:
                 log.warning('Typing unavailable: %s',type(exc).__name__);return
             except RetryAfter as exc:
                 delay=exc.retry_after.total_seconds() if isinstance(exc.retry_after,timedelta) else float(exc.retry_after)
-                delay+=.1
+                delay+=.1+(time.monotonic()-started)  # RetryAfter is measured from rejection, not request start
             except (TelegramError,asyncio.TimeoutError) as exc:
                 failures+=1
                 if failures==1 or failures%10==0:log.warning('Typing deferred: %s',type(exc).__name__)

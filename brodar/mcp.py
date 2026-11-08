@@ -88,6 +88,8 @@ class AuditedMcp(FastMCP):
                 def check():
                     if self.broker.capability is not cap:raise PermissionError('Tool turn revoked')
                 fence_token=WRITE_FENCE.set(check)
+                activity=getattr(self.broker,"on_activity",None)
+                if activity:await activity(cap)
                 output=await fn(*values,**named)
                 check()
                 from .redaction import scrub
@@ -226,6 +228,80 @@ def build_tools(broker):
         return result(await broker.approvals.request_action(broker.store.scope,cap.turn_id,action,reason))
 
     @mcp.tool()
+    async def owner_execute(request_message_id:str,argv:list[str],operation_id:str,approval_id:str|None=None,timeout_seconds:int=900)->str:
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await source.owner_jobs.submit(source,request_message_id,argv,operation_id,approval_id,timeout_seconds))
+
+    @mcp.tool()
+    async def owner_command_approval(request_message_id:str,argv:list[str],reason:str)->str:
+        from .owner_tools import owner_request,classify_owner
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        cap,request,check=owner_request(source,request_message_id)
+        action,needed=classify_owner(argv,(source.commands.root/'owner').resolve())
+        if not needed:return result({'approval_required':False})
+        check();return result(await source.approvals.request_action(source.store.scope,cap.turn_id,action,reason))
+
+    @mcp.tool()
+    async def owner_skill(request_message_id:str,action:str,name:str,operation_id:str,source_url:str='',ref:str='HEAD',subdirectory:str='.')->str:
+        import sys
+        if action not in {'install','update','remove'}:raise ValueError('Choose install, update or remove')
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        argv=[sys.executable,'-m','brodar.skill_install',action,name,'--ref',ref,'--subdirectory',subdirectory]
+        if source_url:argv.extend(['--source',source_url])
+        return result(await source.owner_jobs.submit(source,request_message_id,argv,operation_id,timeout=600))
+
+    @mcp.tool()
+    async def owner_skill_run(request_message_id:str,skill_id:str,resource:str,arguments:list[str],operation_id:str)->str:
+        import sys,shutil
+        from pathlib import Path,PurePosixPath
+        from .skills import LIBRARY
+        from .owner_tools import owner_request
+        from .commands import CREDENTIAL
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        cap,request,check=owner_request(source,request_message_id)
+        await LIBRARY.refresh()
+        if skill_id not in LIBRARY.entries:raise ValueError('Unknown skill ID; use skills_list')
+        package=LIBRARY.entries[skill_id]['root'];rel=PurePosixPath(resource)
+        if rel.is_absolute() or '..' in rel.parts or '\\' in resource:raise ValueError('Use a relative skill resource')
+        original=(package/resource).resolve()
+        if not original.is_relative_to(package) or not original.is_file() or original.is_symlink():raise ValueError('Skill script unavailable')
+        destination=source.commands.root/'owner'/'skill-sources'/skill_id
+        def copy():
+            check();total=0
+            for file in package.rglob('*'):
+                if '.git' in file.relative_to(package).parts:continue
+                if file.is_symlink():raise PermissionError('Skill symlinks denied')
+                if file.is_file():
+                    if CREDENTIAL.search(file.name):raise PermissionError('Credential-bearing skill files denied')
+                    total+=file.stat().st_size
+                    if file.stat().st_size>50_000_000 or total>100_000_000:raise ValueError('Skill package too large')
+            destination.mkdir(mode=0o700,parents=True,exist_ok=True)
+            shutil.copytree(package,destination,dirs_exist_ok=True,ignore=shutil.ignore_patterns('.git'))
+            check()
+        await asyncio.to_thread(copy)
+        script=str(Path('skill-sources')/skill_id/resource)
+        prefix={'.py':[sys.executable],'.sh':['sh'],'.js':['node']}.get(original.suffix)
+        if prefix is None:raise ValueError('Choose a Python, shell or JavaScript script')
+        check();return result(await source.owner_jobs.submit(source,request_message_id,[*prefix,script,*arguments],operation_id,timeout=900))
+
+    @mcp.tool()
+    async def owner_job_status(request_message_id:str,job_id:str,cancel:bool=False)->str:
+        from .owner_tools import owner_request
+        from .store import records
+        from uuid import UUID
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        _,request,check=owner_request(source,request_message_id);uid=str(UUID(job_id))
+        def read():
+            check()
+            with source.store.db.transaction(source.store.scope.audience) as c:
+                if cancel:c.execute("UPDATE brodar_v2.jobs SET status='cancelled' WHERE audience=%s AND id=%s AND kind='owner_exec' AND status IN ('pending','running')",(source.store.scope.audience,uid))
+                c.execute("SELECT id,status,payload FROM brodar_v2.jobs WHERE audience=%s AND id=%s AND kind='owner_exec'",(source.store.scope.audience,uid))
+                rows=records(c)
+                if not rows:raise ValueError('No owner execution job in this audience')
+                return rows[0]
+        return result(await source.store.db.run(read))
+
+    @mcp.tool()
     async def group_routes()->str:
         broker.require()
         return result(await broker.router.rooms())
@@ -255,13 +331,19 @@ def build_tools(broker):
     async def telegram_media_lookup(kind:str,identifier:str,offset:int=0):
         from .telegram_media import lookup
         source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
-        if kind=='sticker_preview':
-            from .telegram_media import sticker_preview
+        if kind in {'sticker_preview','sticker_candidate'}:
+            from .telegram_media import sticker_preview,sticker_candidate
             from mcp.types import TextContent
             from mcp.server.fastmcp.utilities.types import Image
-            metadata,png=await sticker_preview(source,identifier,offset)
+            metadata,png=await (sticker_candidate(source,identifier) if kind=="sticker_candidate" else sticker_preview(source,identifier,offset))
             return [TextContent(type='text',text=result(metadata)),Image(data=png,format='png').to_image_content()]
         return result(await lookup(source,kind,identifier,offset))
+
+    @mcp.tool()
+    async def telegram_send_sticker(selection_ref:str,operation_id:str,reply_to_message_id:int|None=None,final:bool=True)->str:
+        from .telegram_media import send_selected_sticker
+        source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
+        return result(await send_selected_sticker(source,selection_ref,operation_id,reply_to_message_id,final))
 
     @mcp.tool()
     async def group_send(chat_id:int,text:str,operation_id:str,topic_id:int=0,reply_to_message_id:int|None=None)->str:
@@ -364,6 +446,17 @@ def build_tools(broker):
                 return result(await broker.artifacts.put(turn_id=cap.turn_id,operation_id=operation_id,
                     filename=filename,mime=mime_type,body=body,request_hash=hashlib.sha256(body+filename.encode()+mime_type.encode()+str(sensitive).encode()).hexdigest(),metadata={'sensitive':sensitive}))
             finally:WRITE_FENCE.reset(token)
+
+        @mcp.tool()
+        async def artifact_retain(artifact_id:str,request_message_id:str,approval_id:str|None=None)->str:
+            import re
+            cap=broker.require(visible=True)
+            request=broker.fresh_request(request_message_id)
+            if not re.search(r'\b(?:save|keep|retain|archive)\b|saqla|сохран|остав',request.text,re.I):
+                raise PermissionError('Retention needs an explicit fresh keep/save request')
+            def check():
+                if broker.capability is not cap or broker._requests.get(request_message_id) is not request:raise PermissionError('Retention request ended or changed')
+            return result(await broker.artifacts.retain(artifact_id,{'message_id':request.id,'actor':request.actor},check=check,approval_id=approval_id,approvals=broker.approvals))
 
         @mcp.tool()
         async def workspace_checkout(artifact_id:str,approval_id:str|None=None)->str:

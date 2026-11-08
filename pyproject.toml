@@ -8,6 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "rustam_z" }]
 
 dependencies = [
+    "prompt_toolkit>=3.0.52,<4",
     "mcp>=1.2.0,<2",
     "uvicorn>=0.30",
     "starlette>=0.37",
@@ -43,7 +44,7 @@ dev = [
 
 [project.scripts]
 hamroh = "hamroh.__main__:main"
-brodar = "brodar.__main__:main"
+brodar = "brodar.__main__:cli"
 
 [build-system]
 requires = ["hatchling"]

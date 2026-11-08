@@ -9,32 +9,18 @@ from pathlib import Path
 from .settings import Settings
 
 
-async def doctor(cfg):
-    from .hyperagent import HyperagentTransport
-    report={'brain':cfg.brain,'model':cfg.model,'database_configured':bool(cfg.database_url),
-            'telegram_configured':bool(cfg.telegram_token),'google_configured':bool(cfg.google_key),
-            'allowed_chat_count':len(cfg.allowed_chats)}
-    report['research']={'transport':cfg.research_transport,'credentials_and_agent_configured':HyperagentTransport(cfg.hyperagent_auth_file,cfg.hyperagent_agent_id).ready}
-    if cfg.database_url:
-        from .postgres import Postgres
-        db=Postgres(cfg.database_url)
-        try:
-            def check():
-                with db.transaction(readonly=True) as c:
-                    c.execute('SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')
-                    role,superuser,bypass=c.fetchone()
-                    c.execute("SELECT to_regclass('brodar_v2.messages') IS NOT NULL")
-                    return {'connected':True,'runtime_role':role,'superuser':superuser,
-                            'bypasses_row_security':bypass,'schema_present':c.fetchone()[0]}
-            report['database']=await db.run(check)
-        except Exception as e:report['database']={'connected':False,'error':type(e).__name__}
-        finally:await db.close()
-    print(json.dumps(report,indent=2))
-
 
 def main():
     parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.')
-    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','hyperagent-login','hyperagent-status','backup','restore','forget-history','setup-storage'],default='run')
+    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','hyperagent-login','hyperagent-status','backup','restore','forget-history','setup-storage','onboard','configure','setup-neon','profile','service','tui'],default=None)
+    parser.add_argument('target',nargs='?')
+    parser.add_argument('--profile',type=Path)
+    parser.add_argument('--plain',action='store_true')
+    parser.add_argument('--advanced',action='store_true')
+    parser.add_argument('--resume',action='store_true')
+    parser.add_argument('--non-interactive',action='store_true')
+    parser.add_argument('--json',action='store_true')
+    parser.add_argument('--offline',action='store_true')
     parser.add_argument('--brain',choices=['codex','claude'])
     parser.add_argument('--env-file',type=Path)
     parser.add_argument('--admin-url-file',type=Path,help='Private file holding an operator database URL; never pass a URL on the command line')
@@ -56,7 +42,53 @@ def main():
     args=parser.parse_args()
     logging.basicConfig(level=logging.WARNING,format='%(levelname)s %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.ERROR)
-    cfg=Settings.load(env_file=args.env_file,brain=args.brain)
+    import sys
+    if args.command is None:
+        if not sys.stdin.isatty():parser.error('Specify run for a worker, onboard for setup, or doctor --json for automation')
+        from .profile import read_profile
+        _,profile=read_profile(args.profile)
+        args.command='tui' if profile else 'onboard'
+    if args.command in {'onboard','configure','setup-neon'}:
+        from .onboarding import wizard
+        section='neon' if args.command=='setup-neon' else args.target if args.command=='configure' else None
+        try:
+            choice=asyncio.run(wizard(args.profile,plain=args.plain,advanced=args.advanced,section=section,non_interactive=args.non_interactive,admin_file=args.admin_url_file))
+            if choice:
+                cfg=Settings.load(profile=Path(choice['profile']))
+                if choice['action']=='foreground':
+                    from .runtime import run
+                    cfg.require_run();asyncio.run(run(cfg))
+                else:
+                    from .service import service
+                    print(json.dumps(service(cfg,'start'),indent=2))
+        except KeyboardInterrupt:print('Setup cancelled; saved configuration kept.')
+        return
+    cfg=Settings.load(env_file=args.env_file,brain=args.brain,profile=args.profile)
+    if args.command=='profile':
+        from .profile import export_profile,read_profile,write_profile
+        if args.target=='export':
+            if not args.output:parser.error('profile export needs --output DIRECTORY')
+            print(json.dumps(export_profile(cfg.profile_path,args.output),indent=2))
+        elif args.target=='import':
+            if not args.archive:parser.error('profile import needs --archive PROFILE_JSON')
+            _,value=read_profile(args.archive)
+            if cfg.profile_path.exists():parser.error('Destination profile exists; choose a new --profile path to import without overwriting')
+            if value.get('prompt_dir'):
+                import shutil
+                destination=cfg.profile_path.parent/'prompts'
+                if destination.exists():parser.error('Destination prompt directory exists; choose a clean profile directory')
+                shutil.copytree(value['prompt_dir'],destination,ignore=shutil.ignore_patterns('*.key','*.env'))
+                value['prompt_dir']=str(destination)
+            value.pop('secret_env_file',None)
+            write_profile(cfg.profile_path,value);print('Profile imported; configure local credentials separately.')
+        else:parser.error('Choose profile export or import')
+        return
+    if args.command=='service':
+        from .service import service
+        print(json.dumps(service(cfg,args.target or 'status'),indent=2));return
+    if args.command=='tui':
+        from .tui import tui
+        asyncio.run(tui(cfg));return
     if args.command in {'hyperagent-login','hyperagent-status'}:
         from .hyperagent import login,HyperagentTransport,read_auth,write_auth,HyperagentError
         async def connect_researcher():
@@ -85,7 +117,7 @@ def main():
         import os
         from dotenv import dotenv_values
         from .storage_setup import setup_storage
-        values=dotenv_values(args.env_file or Path.home()/'secrets/.env')
+        values=dotenv_values(args.env_file) if args.env_file else {}
         if args.storage_config is None:parser.error('--storage-config is required')
         key=os.environ.get('NEON_API_KEY') or values.get('NEON_API_KEY')
         print(json.dumps(asyncio.run(setup_storage(key,args.project_id,args.branch_id,args.storage_config)),indent=2))
@@ -106,7 +138,10 @@ def main():
             argv=['claude','auth','login']
         raise SystemExit(subprocess.call(argv,env=env,cwd=str(home)))
     elif args.command=='doctor':
-        asyncio.run(doctor(cfg))
+        from .diagnostics import diagnose
+        report=asyncio.run(diagnose(cfg,network=not args.offline))
+        print(json.dumps(report,indent=2) if args.json else '\n'.join(c['name']+': '+c['status']+' — '+str(c['detail'])+(' | '+c['fix'] if c['fix'] else '') for c in report['checks']))
+        raise SystemExit(0 if report['ready'] else 1)
     else:
         cfg.require_run()
         from .runtime import run
@@ -114,4 +149,13 @@ def main():
         except KeyboardInterrupt:pass
 
 
-if __name__=='__main__':main()
+def cli():
+    try:main()
+    except (ValueError,RuntimeError) as exc:
+        from .redaction import scrub
+        raise SystemExit(scrub(str(exc))) from None
+    except Exception as exc:
+        raise SystemExit('Brodar action failed ('+type(exc).__name__+'). Use doctor or the private service log to diagnose.') from None
+
+
+if __name__=='__main__':cli()

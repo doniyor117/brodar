@@ -103,14 +103,14 @@ class GroupRouter:
         caption=scrub(caption)
         from .artifacts import Artifacts
         cap=source.require(visible=True);target=self.target(chat_id,topic)
-        if source.artifacts is None or self.objects is None:raise RuntimeError('Durable object storage unavailable')
+        if source.artifacts is None:raise RuntimeError('Durable object storage unavailable')
         row=await source.artifacts.get_record(artifact_id)
         if row is None:raise ValueError('Source artifact missing')
         if (row.get('metadata') or {}).get('sensitive'):raise PermissionError('A sensitive-read approval does not authorize cross-group file disclosure; create an explicitly redacted deliverable')
         async def transfer():
             original,body=await source.artifacts.read(artifact_id)
             if source.capability is not cap:raise PermissionError('Source turn revoked')
-            artifacts=Artifacts(target,self.objects)
+            artifacts=Artifacts(target,self.objects,root=source.artifacts.root,temp_budget=source.artifacts.temp_budget,retained_budget=source.artifacts.retained_budget,idle_seconds=source.artifacts.idle_seconds)
             item=await artifacts.put(turn_id=cap.turn_id,operation_id='transfer:'+operation,filename=original['filename'],mime=original['mime_type'],body=body,request_hash=original['content_hash'],metadata={'source_artifact_id':artifact_id})
             async def guard():
                 await self.lease().require()
@@ -133,7 +133,7 @@ class GroupRouter:
         artifact_id=None
         if media.startswith('artifact:'):
             artifact_id=str(UUID(media[9:]))
-            if source.artifacts is None or self.objects is None:raise RuntimeError('Durable object storage unavailable')
+            if source.artifacts is None:raise RuntimeError('Durable object storage unavailable')
             record=await source.artifacts.get_record(artifact_id)
             if record is None:raise ValueError('Source artifact missing')
             if (record.get('metadata') or {}).get('sensitive'):raise PermissionError('A read approval does not authorize cross-group disclosure of sensitive files')
@@ -143,7 +143,7 @@ class GroupRouter:
             token=WRITE_FENCE.set(guard)
             try:
                 reference=media
-                artifacts=Artifacts(target,self.objects) if self.objects else None
+                artifacts=Artifacts(target,self.objects,root=source.artifacts.root,temp_budget=source.artifacts.temp_budget,retained_budget=source.artifacts.retained_budget,idle_seconds=source.artifacts.idle_seconds)
                 if artifact_id:
                     original,body=await source.artifacts.read(artifact_id)
                     guard()
