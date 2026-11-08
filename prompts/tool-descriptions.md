@@ -220,4 +220,4 @@ Run a script from any discovered Codex/Claude skill for a fresh authenticated ow
 
 
 ## workspace_publish
-Import a completed workspace file as a scoped temporary artifact for actual delivery, without passing base64 through model context. Use a relative workspace path, operation_id, optional filename/mime_type and sensitive flag. Maximum 50 MB. Credential paths, symlinks and outside-workspace reads are denied; sensitive paths need exact owner approval. This does not permanently save the file; explicit artifact_retain is separate.
+Import a completed workspace file as a scoped temporary artifact for actual delivery, without passing base64 through model context. Use a relative workspace path, operation_id, optional filename/mime_type and sensitive flag. Paths under owner/ also require request_message_id from a fresh authenticated owner request; ordinary members cannot read owner job scratch. Maximum 50 MB. Credential paths, symlinks and outside-workspace reads are denied; sensitive paths need exact owner approval. This does not permanently save the file; explicit artifact_retain is separate.

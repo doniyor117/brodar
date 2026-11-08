@@ -171,3 +171,11 @@ def test_managed_restart_starts_replacement_instead_of_reusing_old_running_flag(
     result=service(cfg,'restart')
     assert result['started'] is True and result['pid']==22
     assert launcher.call_count==1 and service(cfg,'status')['running'] is True
+
+
+def test_regular_gateway_cannot_read_owner_job_scratch(tmp_path):
+    from brodar.commands import CommandGateway
+    gateway=CommandGateway(tmp_path)
+    with pytest.raises(PermissionError,match='Owner job workspace'):gateway.classify(['cat','owner/report.txt'])
+    gateway.classify(['cat','owner/report.txt'],owner=True)
+    gateway.classify(['cat','group-report.txt'])

@@ -459,17 +459,23 @@ def build_tools(broker):
             return result(await broker.artifacts.retain(artifact_id,{'message_id':request.id,'actor':request.actor},check=check,approval_id=approval_id,approvals=broker.approvals))
 
         @mcp.tool()
-        async def workspace_publish(path:str,operation_id:str,filename:str='',mime_type:str='',sensitive:bool=False,approval_id:str|None=None)->str:
+        async def workspace_publish(path:str,operation_id:str,filename:str='',mime_type:str='',sensitive:bool=False,approval_id:str|None=None,request_message_id:str|None=None)->str:
             import mimetypes,hashlib,os
             from pathlib import Path
             from .redaction import scrub
             cap=broker.require(visible=True)
-            action,needed=broker.commands.classify(['cat',path])
+            owner=False
+            owner_check=lambda:None
+            if request_message_id:
+                from .owner_tools import owner_request
+                _,_,owner_check=owner_request(broker,request_message_id);owner=True
+            action,needed=broker.commands.classify(['cat',path],owner=owner)
             if needed:
                 if not broker.approvals or not approval_id:raise PermissionError('Sensitive workspace file requires exact owner DM approval')
                 await broker.approvals.consume_action(broker.store.scope,approval_id,action)
             source=broker.commands.root/path
             def check():
+                owner_check()
                 if broker.capability is not cap:raise PermissionError('Workspace publish turn revoked')
             def read():
                 check();fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)

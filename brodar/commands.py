@@ -23,7 +23,7 @@ class CommandGateway:
     def __init__(self,root):
         self.root=Path(root).resolve();self.lock=asyncio.Lock()
 
-    def classify(self,argv):
+    def classify(self,argv,*,owner=False):
         if not argv or len(argv)>60 or sum(len(x) for x in argv)>12000:raise ValueError('Invalid command size')
         name=argv[0]
         if name!=Path(name).name or name in DENIED or name not in READ_ONLY|MUTATING:
@@ -37,6 +37,7 @@ class CommandGateway:
                 continue
             value=arg
             path=(self.root/value).resolve()
+            if path.is_relative_to(self.root/'owner') and not owner:raise PermissionError('Owner job workspace requires a fresh owner request')
             if not path.is_relative_to(self.root):raise PermissionError('Path outside this chat workspace is denied')
             # Even workspace-local symlinks are rejected to avoid aliases to sensitive names.
             for part in [self.root/value,*list((self.root/value).parents)]:
