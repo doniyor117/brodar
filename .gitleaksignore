@@ -5,3 +5,7 @@ e37b634b1770d6b8ecb65e9c03079b8d459dced5:prompts/hyperresearcher-system.md:gener
 7c29105223a393ddb70aae1dffe80002987808fd:tests/test_secrets_scrubber.py:github-pat:29
 7c29105223a393ddb70aae1dffe80002987808fd:tests/test_secrets_scrubber.py:jwt:51
 7c29105223a393ddb70aae1dffe80002987808fd:tests/test_secrets_scrubber.py:slack-bot-token:45
+
+# Same reviewed synthetic/prose candidates after sanitized ref rewriting.
+e9c7b0af2e215555ee0e84e4aad7db7b3c45c9e8:prompts/hyperresearcher-system.md:generic-api-key:59
+d57ae031147c3402f6cfcf070b2418382cc9f7ca:tests/test_secrets_scrubber.py:generic-api-key:76
