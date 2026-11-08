@@ -196,6 +196,7 @@ DM your bot from the configured owner account. For a group, add the bot and send
 | `brodar login` | The brain selected in this instance's configuration; Codex if none configured | No |
 | `brodar configure brain` | Lets you select/save the brain and offers its login | Yes |
 | `codex mcp login neon --no-browser` | Operator Neon MCP, for optional database provisioning | No |
+| `brodar hyperagent-login` | Hyperagent MCP account access, for optional research | No |
 
 Login prints **Codex** or **Claude Code** and the dedicated profile directory before opening authorization. `--brain codex` / `--brain claude` are equivalent one-command overrides, not permanent switches. An explicit `BRODAR_BRAIN` environment setting overrides the saved profile; unset that override if the wizard's saved choice is not being used.
 
@@ -256,6 +257,14 @@ brodar hyperagent-status --agent-id YOUR_RESEARCHER_AGENT_ID
 Use its Hyperagent **agent ID**, not its Telegram username. `hyperagent-status` checks access/discovery; it does not launch paid research or prove every connected service works.
 
 For **standalone interactive Codex** usage, `codex mcp login hyperagent --no-browser` and `codex mcp list` are the normal client commands. For Brodar, use `brodar hyperagent-login` as above: a generic MCP login alone does not establish Brodar's saved binding. The helper references the canonical Codex OAuth record rather than copying rotating refresh credentials.
+
+For **standalone interactive Claude Code**, Hyperagent documents this registration:
+
+```sh
+claude mcp add --transport http hyperagent https://hyperagent.com/api/mcp
+```
+
+Open Claude Code, run `/mcp`, select `hyperagent`, and authenticate. This connects your interactive Claude client; Brodar's background research still uses the host connection established by `brodar hyperagent-login`. MCP access is account-level, so there is no separate per-agent MCP invocation card to enable.
 
 ### 3. Enable the connection in Brodar
 
