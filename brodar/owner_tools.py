@@ -58,10 +58,10 @@ class OwnerJobs:
         def create():
             check()
             with broker.store.db.transaction(broker.store.scope.audience) as c:
-                c.execute('SELECT source_hash FROM brodar_v2.messages WHERE audience=%s AND id=%s AND sender_id IS NOT DISTINCT FROM %s',(broker.store.scope.audience,request.id,request.actor))
+                c.execute('SELECT source_hash,changed_at FROM brodar_v2.messages WHERE audience=%s AND id=%s AND sender_id IS NOT DISTINCT FROM %s',(broker.store.scope.audience,request.id,request.actor))
                 row=c.fetchone()
                 if not row:raise PermissionError('Owner source request is unavailable')
-                payload['source_hash']=row[0]
+                payload['source_hash']=row[0];payload['source_changed_at']=str(row[1])
                 c.execute("INSERT INTO brodar_v2.jobs(id,audience,topic_id,kind,payload,due_at,dedup_key) VALUES (%s,%s,%s,'owner_exec',%s::jsonb,now(),%s) ON CONFLICT DO NOTHING RETURNING id",(uid,broker.store.scope.audience,broker.store.scope.topic_id,json.dumps(payload),uid))
                 created=c.fetchone() is not None
                 c.execute('SELECT payload,status FROM brodar_v2.jobs WHERE audience=%s AND id=%s',(broker.store.scope.audience,uid))
@@ -81,10 +81,10 @@ class OwnerJobs:
         if not (payload.get('operator') and store.scope.audience.startswith('terminal:')) and payload['requester_id'] not in self.cfg.owner_ids:raise PermissionError('Owner authority revoked')
         def read():
             with store.db.transaction(store.scope.audience,readonly=True) as c:
-                c.execute('SELECT source_hash,sender_id FROM brodar_v2.messages WHERE audience=%s AND id=%s',(store.scope.audience,payload['request_message_id']))
+                c.execute('SELECT source_hash,sender_id,changed_at FROM brodar_v2.messages WHERE audience=%s AND id=%s',(store.scope.audience,payload['request_message_id']))
                 return c.fetchone()
         row=await store.db.run(read)
-        if not row or row[0]!=payload['source_hash'] or row[1]!=payload['requester_id']:raise PermissionError('Owner source changed')
+        if not row or row[0]!=payload['source_hash'] or row[1]!=payload['requester_id'] or str(row[2])!=payload['source_changed_at']:raise PermissionError('Owner source changed')
 
     async def _run(self,store,uid,payload):
         async with self.semaphore:

@@ -57,7 +57,7 @@ class Approvals:
         fingerprint=digest(json.dumps(action,sort_keys=True))
         def use():
             with self.db.transaction(scope.audience) as c:
-                c.execute("UPDATE brodar_v2.approvals SET status='used' WHERE audience=%s AND topic_id=%s AND id=%s AND action_hash=%s AND status='approved' AND expires_at>now() RETURNING id",
-                    (scope.audience,scope.topic_id,str(UUID(uid)),fingerprint))
+                c.execute("UPDATE brodar_v2.approvals SET status='used' WHERE audience=%s AND topic_id=%s AND id=%s AND action_hash=%s AND status='approved' AND expires_at>now() AND decided_by=ANY(%s::bigint[]) RETURNING id",
+                    (scope.audience,scope.topic_id,str(UUID(uid)),fingerprint,list(self.cfg.owner_ids)))
                 if not c.fetchone():raise PermissionError('Approval missing, expired, already used or for another action')
         await self.db.run(use)
