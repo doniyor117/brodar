@@ -14,6 +14,7 @@ Creates ~/.local/bin/brodar, then opens the resumable setup wizard.
   --help          Show this help without creating an environment
 Set BRODAR_INSTALL_VENV to choose a different installation directory.
 Afterward: export PATH="$HOME/.local/bin:$PATH"
+Wizard: brodar onboard (or brodar onboard --plain over SSH)
 Run: brodar service start | brodar tui | brodar --help
 Stop: brodar service stop. Remove installation: sh uninstall.sh
 HELP

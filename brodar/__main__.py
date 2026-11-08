@@ -24,7 +24,9 @@ DAILY COMMANDS
   brodar run                      Foreground mode; Ctrl-C stops it
   brodar doctor --json            Check connections and readiness
   brodar configure brain          Change brain/model configuration
-  brodar login                    Authorize the dedicated brain profile
+  brodar login codex              Authorize Brodar's Codex profile
+  brodar login claude             Authorize Brodar's Claude profile
+  brodar login                    Use configured brain (default: codex)
 
 HELP AND REMOVAL
   brodar --help                    Show all commands and flags
@@ -48,7 +50,7 @@ Full installation, updates, platform launchers and removal: README.md.
     parser.add_argument('--non-interactive',action='store_true')
     parser.add_argument('--json',action='store_true')
     parser.add_argument('--offline',action='store_true')
-    parser.add_argument('--brain',choices=['codex','claude'])
+    parser.add_argument('--brain',choices=['codex','claude'],help='Override the brain for this command only; persist changes with configure brain')
     parser.add_argument('--env-file',type=Path)
     parser.add_argument('--admin-url-file',type=Path,help='Private file holding an operator database URL; never pass a URL on the command line')
     parser.add_argument('--runtime-env-file',type=Path,default=Path.home()/'.config/brodar/runtime.env')
@@ -90,6 +92,10 @@ Full installation, updates, platform launchers and removal: README.md.
                     print(json.dumps(service(cfg,'start'),indent=2))
         except KeyboardInterrupt:print('Setup cancelled; saved configuration kept.')
         return
+    if args.command=='login' and args.target:
+        if args.target not in {'codex','claude'}:parser.error('Choose login codex or login claude')
+        if args.brain and args.brain!=args.target:parser.error('Login target and --brain must agree')
+        args.brain=args.target
     cfg=Settings.load(env_file=args.env_file,brain=args.brain,profile=args.profile)
     if args.command=='profile':
         from .profile import export_profile,read_profile,write_profile
@@ -163,6 +169,7 @@ Full installation, updates, platform launchers and removal: README.md.
             env.pop('CODEX_HOME',None)
             env['CLAUDE_CONFIG_DIR']=str(home)
             argv=['claude','auth','login']
+        print('Signing in to '+('Codex' if cfg.brain=='codex' else 'Claude Code')+' for Brodar (dedicated '+str(home)+' profile).',flush=True)
         raise SystemExit(subprocess.call(argv,env=env,cwd=str(home)))
     elif args.command=='doctor':
         from .diagnostics import diagnose

@@ -14,7 +14,7 @@ async def diagnose(cfg,*,network=True):
     from urllib.parse import urlsplit,unquote
     register_secrets(cfg.telegram_token,cfg.database_url,cfg.google_key,unquote(urlsplit(cfg.database_url).password or ''))
     binary=shutil.which(cfg.brain)
-    add('provider','ok' if binary else 'error','CLI installed' if binary else 'CLI missing','Install '+cfg.brain+' for this platform')
+    add('provider','ok' if binary else 'error',cfg.brain+' CLI installed' if binary else 'CLI missing','Install '+cfg.brain+' for this platform')
     if binary:
         try:
             proc=await asyncio.create_subprocess_exec(binary,'--version',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)

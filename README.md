@@ -4,6 +4,14 @@ A Telegram companion with selectable **Codex CLI or Claude Code brains**, search
 
 Forked from [Rustam-Z/hamroh](https://github.com/Rustam-Z/hamroh); MIT attribution and the original Claude worker are preserved. `brodar` runs the shared coordinator; the historical `hamroh` command is separate.
 
+**Already installed? Open the setup wizard:**
+
+```sh
+brodar onboard
+# Simple prompts for SSH/small terminals:
+brodar onboard --plain
+```
+
 **Start here:** [Quickstart](#quickstart) · [Commands](#run-stop-and-open-the-tui) · [Update](#update) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
 
 ## How it works
@@ -22,7 +30,7 @@ You need Python **3.11+**, Git, an internet connection, a Telegram account and a
 
 ```sh
 sudo apt update
-sudo apt install -y git python3 python3-venv python3-pip
+sudo apt install -y git curl ca-certificates bash python3 python3-venv python3-pip
 ```
 
 Check `python3 --version` is 3.11 or newer; older distributions need a newer Python first.
@@ -31,21 +39,73 @@ Check `python3 --version` is 3.11 or newer; older distributions need a newer Pyt
 
 ```sh
 pkg update
-pkg install python git clang rust libjpeg-turbo libpng libffi openssl pkg-config codex
+pkg install python git clang rust libjpeg-turbo libpng libffi openssl pkg-config
 ```
 
 Use native Termux packages, not the desktop Linux installer or a glibc binary. Brodar is developed on Termux/Python 3.14. Turn off battery optimization and allow background/autostart for Termux if hosting on a phone.
 
 **macOS:** install Python 3.11+ and Git through your usual package manager (for Homebrew: `brew install python git`). macOS and WSL use the source route below but have not been exercised on real devices. Native Windows service management is unsupported; use WSL2.
 
-### 2. Pick a brain and create a Telegram bot
+### 2. Install your chosen brain CLI
 
-Install **one** brain CLI before onboarding:
+Pick **Codex or Claude Code** below for your operating system. You may install both and switch later, but only one is selected per Brodar instance. These commands install the CLI executable; Brodar's dedicated sign-in happens in step 4.
 
-- **Codex:** Termux users installed it above. On desktop Linux/macOS/WSL with Node.js/npm installed, run `npm install -g @openai/codex`; see the [official Codex installation guide](https://developers.openai.com/codex/cli/). Check `codex --version`.
-- **Claude Code:** follow [Anthropic's installation guide](https://code.claude.com/docs/en/setup) for your platform, then check `claude --version`. Native Android compatibility depends on its available CLI build.
+#### Codex on Linux / WSL2
 
-Use an account/plan that grants access to the selected CLI and model. Brodar onboarding opens **its own dedicated runtime login**; logging into your normal CLI alone does not authorize Brodar. You only need a Codex account if you choose the Codex brain or the optional Codex-based Neon MCP provisioning route. Claude users can use the existing-database connection-file route instead.
+OpenAI's standalone installer does not require Node/npm:
+
+```sh
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+codex --version
+```
+
+If you already manage Node.js/npm, the alternative is `npm install -g @openai/codex`. Choose one installation method. See [OpenAI's installation instructions](https://github.com/openai/codex#installing-and-running-codex-cli).
+
+#### Codex on Android / Termux
+
+```sh
+pkg update
+pkg install codex
+codex --version
+```
+
+This uses Termux's native Android build. Do not run the desktop Linux installer in native Termux. Source: [Termux's Codex package recipe](https://github.com/termux/termux-packages/blob/master/packages/codex/build.sh). If your repository mirror does not offer it, check `termux-change-repo` and update the package lists rather than substituting a Linux binary.
+
+#### Claude Code on Linux / WSL2
+
+Anthropic's standalone installer does not require Node/npm:
+
+```sh
+curl -fsSL https://claude.ai/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+claude --version
+```
+
+Alternatively, with Node.js 22+ and npm installed: `npm install -g @anthropic-ai/claude-code`. Choose one installation method. See [Anthropic's platform and installation documentation](https://code.claude.com/docs/en/setup).
+
+#### Claude Code on Android / Termux
+
+Android is not in Anthropic's supported native/npm platform list. Plain `npm install -g @anthropic-ai/claude-code` is **not** the current native-Termux solution: it can install a launcher without a runnable Android binary. See the [upstream Android issue](https://github.com/anthropics/claude-code/issues/50270).
+
+For **aarch64 / ARM64 Termux**, a community compatibility route used by this project is:
+
+```sh
+pkg update
+pkg install nodejs-lts git ripgrep
+npm install -g @xurxuo/claude-code-termux
+claude --version
+```
+
+If Node.js 18+ is already installed, keep it; do not install both `nodejs` and `nodejs-lts`.
+
+The [wrapper's published instructions](https://www.npmjs.com/package/@xurxuo/claude-code-termux) describe running the official Linux ARM64 binary through `glibc-runner`. It is a third-party wrapper, not official Anthropic Android support; it can install compatibility dependencies and fetch/update the native binary on first launch, including `--version`. To disable its daily update check after initial setup, use `export CLAUDE_CODE_TERMUX_NO_AUTO_UPDATE=1`. Other Android architectures are not covered by these instructions. A working `claude --version` verifies launch, not a complete Brodar conversation.
+
+#### Accounts and Telegram bot
+
+Use an account/plan that grants access to your selected CLI and model. **The default brain is Codex**, but the wizard explicitly asks `Brain (codex/claude)` and saves your choice. Installing both CLIs does not make Brodar use both or choose automatically. Brodar has no automatic provider fallback.
+
+Brodar uses **dedicated authentication directories**, separate from your normal terminal CLI login. The wizard can open the chosen provider's sign-in. See [Which provider does login use?](#which-provider-does-login-use) for explicit commands. A Claude deployment does not need a Codex account when using the existing-database Neon connection-file route.
 
 In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts, and keep the token private. The wizard asks for it using hidden input. You also need your own **numeric Telegram user ID**, which you enter in the trusted local setup terminal. Never put your token in a command, Git commit or group message.
 
@@ -54,20 +114,29 @@ In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, follow t
 ```sh
 git clone https://github.com/doniyor117/brodar.git
 cd brodar
-sh install.sh
-```
-
-The installer creates `~/.local/share/brodar/venv`, installs dependencies, writes `~/.local/bin/brodar`, and opens the setup wizard automatically. It does not replace your system Python. For simple prompts over SSH, use `sh install.sh --plain` instead.
-
-After installation, make the command available in your current shell:
-
-```sh
+sh install.sh --no-onboard
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Add that export line once to your shell startup file (`~/.bashrc` or `~/.zshrc`) for future terminals. You can always run `~/.local/bin/brodar` directly.
+The installer creates `~/.local/share/brodar/venv`, installs dependencies and writes `~/.local/bin/brodar`. It does not replace your system Python. `--no-onboard` deliberately leaves starting the wizard to the next step. If you prefer installation and setup in one command, plain `sh install.sh` opens the wizard automatically.
 
-### 4. Finish the resumable wizard
+Add `export PATH="$HOME/.local/bin:$PATH"` once to your shell startup file (`~/.bashrc` or `~/.zshrc`) for future terminals. You can always run `~/.local/bin/brodar` directly.
+
+### 4. Open the setup wizard
+
+Run this **after installation**:
+
+```sh
+brodar onboard
+```
+
+For SSH or a small phone terminal, use simple line-by-line prompts instead:
+
+```sh
+brodar onboard --plain
+```
+
+Both commands open the same guided setup. Choose `codex` or `claude` at the brain question; this determines the model and login flow that follow. Type `back` to revisit the previous step or `quit` to save progress and leave. Reopen with saved answers using `brodar onboard --resume --plain`. `onboard` is the setup wizard; `tui` is the running bot's dashboard, described later.
 
 The wizard walks through:
 
@@ -77,7 +146,18 @@ The wizard walks through:
 4. Persona Markdown, aliases, timezone and local/permanent file budgets.
 5. Connection checks and a choice to start in the foreground, start in the background, or start later.
 
-It saves progress. If interrupted, run `brodar onboard --resume`. Change individual sections later with `brodar configure brain`, `telegram`, `owner`, `neon`, `persona` or `budgets`.
+To change one section later, run a complete command:
+
+```sh
+brodar configure brain       # choose provider, model and login
+brodar configure telegram    # change bot token
+brodar configure owner       # change primary owner
+brodar configure neon        # change database connection
+brodar configure persona     # edit persona Markdown
+brodar configure budgets     # storage budgets
+```
+
+Restart the worker after configuration changes. The wizard does not require editing Python source files.
 
 For Neon you can choose either:
 
@@ -89,6 +169,8 @@ codex mcp add neon --url https://mcp.neon.tech/mcp
 codex mcp login neon --no-browser
 brodar setup-neon
 ```
+
+The `codex mcp login neon` command logs the **operator's Neon integration** in; it does not sign Brodar into either model provider. You only need that Codex-based route if you choose MCP provisioning. Choosing a Claude brain with a private existing-database URI file needs neither Codex installation nor Codex login.
 
 Setup shows the concrete resource summary before writes; it does not upgrade a paid plan. Browser authorization and BotFather steps require you. Permanent object storage, research delegation and encrypted backups are optional; ordinary local files work without object storage.
 
@@ -105,6 +187,32 @@ brodar tui
 
 DM your bot from the configured owner account. For a group, add the bot and send `/approve` from that same owner account. Other group members can then use it. Configure BotFather `/setprivacy` to **Disable** for ambient group reception, or give the bot suitable Telegram administrator access. Re-add it if Telegram requires that change to take effect. Administrator tools also need the corresponding Telegram permissions.
 
+## Which provider does login use?
+
+| Command | Signs in to | Changes the saved brain? |
+| --- | --- | --- |
+| `brodar login codex` | Brodar's dedicated Codex / OpenAI profile | No |
+| `brodar login claude` | Brodar's dedicated Claude Code / Anthropic profile | No |
+| `brodar login` | The brain selected in this instance's configuration; Codex if none configured | No |
+| `brodar configure brain` | Lets you select/save the brain and offers its login | Yes |
+| `codex mcp login neon --no-browser` | Operator Neon MCP, for optional database provisioning | No |
+
+Login prints **Codex** or **Claude Code** and the dedicated profile directory before opening authorization. `--brain codex` / `--brain claude` are equivalent one-command overrides, not permanent switches. An explicit `BRODAR_BRAIN` environment setting overrides the saved profile; unset that override if the wizard's saved choice is not being used.
+
+For example, to **switch an existing bot to Claude**, install Claude Code using the matching platform instructions, then:
+
+```sh
+brodar configure brain    # answer claude, select its model, finish sign-in
+# If you skipped sign-in in the wizard:
+brodar login claude
+brodar service restart
+brodar doctor --offline
+```
+
+Use `codex` instead when switching back to Codex. `doctor --offline` shows the selected provider/model without calling the model. Use `brodar doctor --json` for network connection checks. Neither doctor command runs paid inference to verify model quality. To sign in over SSH, follow the selected CLI's displayed device/browser instructions; no generic `brodar login` callback flow is shared between the two providers.
+
+For another instance, add the same profile path to every command: `brodar login claude --profile /path/profile.json` and `brodar service restart --profile /path/profile.json`.
+
 ## Run, stop and open the TUI
 
 | Goal | Command |
@@ -117,9 +225,11 @@ DM your bot from the configured owner account. For a group, add the bot and send
 | Read recent sanitized logs | `brodar service logs` |
 | Open terminal dashboard/chat | `brodar tui` |
 | Run in the foreground | `brodar run` (Ctrl-C stops it) |
-| Reopen setup | `brodar onboard --resume` |
+| Open setup wizard | `brodar onboard` (or `brodar onboard --plain` over SSH) |
+| Reopen saved setup | `brodar onboard --resume` |
 | Change model/brain | `brodar configure brain`, then restart |
-| Sign in to the dedicated brain | `brodar login` |
+| Sign in to Codex | `brodar login codex` |
+| Sign in to Claude Code | `brodar login claude` |
 | All commands and flags | `brodar --help` or `brodar -h` |
 | Service command help | `brodar service --help` |
 | Installer help before any environment exists | `sh install.sh --help` |
@@ -167,7 +277,7 @@ To also erase local data, **first export anything you want to keep and stop ever
 ## Troubleshooting
 
 - **`brodar: command not found`:** run `export PATH="$HOME/.local/bin:$PATH"` or use `~/.local/bin/brodar`.
-- **Missing brain executable:** install the chosen Codex/Claude CLI for your platform and check its `--version`, then `brodar login`.
+- **Missing brain executable:** install the chosen Codex/Claude CLI for your platform and check its `--version`, then `brodar login codex` or `brodar login claude`.
 - **Stopped / no replies:** `brodar service status`, `brodar doctor --json`, then `brodar service logs`. In systemd mode use `systemctl --user status brodar` and `journalctl --user -u brodar`.
 - **No group messages:** approve the group as owner, check BotFather privacy/admin permissions, and make sure another host is not polling the same bot.
 - **Authorization incomplete over SSH:** finish the displayed browser/device flow. Dedicated Brodar login and operator Neon MCP login are separate.
