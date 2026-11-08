@@ -4,11 +4,52 @@ A Telegram companion with selectable **Codex CLI or Claude Code brains**, search
 
 Forked from [Rustam-Z/hamroh](https://github.com/Rustam-Z/hamroh); MIT attribution and the original Claude worker are preserved. `brodar` runs the shared coordinator; the historical `hamroh` command is separate.
 
-## Install and onboard
+**Start here:** [Quickstart](#quickstart) · [Commands](#run-stop-and-open-the-tui) · [Update](#update) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
 
-You need Python **3.11+**, Git, a Telegram BotFather bot, a Neon account (or existing Postgres connection), and **one** supported brain CLI with its own account login. Browser authorization/BotFather actions still require you. A Codex subscription is not required when using Claude with the connection-file Neon setup path.
+## How it works
 
-From a reviewed source checkout:
+You run one Brodar worker on your computer, phone or server. It receives Telegram updates, archives conversations in Neon Postgres, and asks your selected Codex CLI or Claude Code brain to act. A terminal dashboard (TUI) attaches to that worker for private chat, configuration and status. Closing the dashboard does not stop Telegram. The background supervisor owns the worker and its brain subprocess; you never need to find and kill a Codex session manually.
+
+Brodar is Python software installed **from this Git repository**. There is currently no supported `npx brodar`, npm package or published PyPI install. The commands below download the source and create its environment for you; no pre-existing Brodar environment is needed.
+
+## Quickstart
+
+### 1. Prepare your computer
+
+You need Python **3.11+**, Git, an internet connection, a Telegram account and a [Neon account](https://console.neon.tech/) or existing Postgres database. Install the tools for your platform:
+
+**Ubuntu/Debian or Ubuntu in WSL2:**
+
+```sh
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip
+```
+
+Check `python3 --version` is 3.11 or newer; older distributions need a newer Python first.
+
+**Android / Termux:**
+
+```sh
+pkg update
+pkg install python git clang rust libjpeg-turbo libpng libffi openssl pkg-config codex
+```
+
+Use native Termux packages, not the desktop Linux installer or a glibc binary. Brodar is developed on Termux/Python 3.14. Turn off battery optimization and allow background/autostart for Termux if hosting on a phone.
+
+**macOS:** install Python 3.11+ and Git through your usual package manager (for Homebrew: `brew install python git`). macOS and WSL use the source route below but have not been exercised on real devices. Native Windows service management is unsupported; use WSL2.
+
+### 2. Pick a brain and create a Telegram bot
+
+Install **one** brain CLI before onboarding:
+
+- **Codex:** Termux users installed it above. On desktop Linux/macOS/WSL with Node.js/npm installed, run `npm install -g @openai/codex`; see the [official Codex installation guide](https://developers.openai.com/codex/cli/). Check `codex --version`.
+- **Claude Code:** follow [Anthropic's installation guide](https://code.claude.com/docs/en/setup) for your platform, then check `claude --version`. Native Android compatibility depends on its available CLI build.
+
+Use an account/plan that grants access to the selected CLI and model. Brodar onboarding opens **its own dedicated runtime login**; logging into your normal CLI alone does not authorize Brodar. You only need a Codex account if you choose the Codex brain or the optional Codex-based Neon MCP provisioning route. Claude users can use the existing-database connection-file route instead.
+
+In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, follow the prompts, and keep the token private. The wizard asks for it using hidden input. You also need your own **numeric Telegram user ID**, which you enter in the trusted local setup terminal. Never put your token in a command, Git commit or group message.
+
+### 3. Download and install Brodar
 
 ```sh
 git clone https://github.com/doniyor117/brodar.git
@@ -16,26 +57,32 @@ cd brodar
 sh install.sh
 ```
 
-The installer uses a private virtual environment and starts `brodar onboard`. It does not install development extras or replace your system Python. No PyPI distribution is advertised.
+The installer creates `~/.local/share/brodar/venv`, installs dependencies, writes `~/.local/bin/brodar`, and opens the setup wizard automatically. It does not replace your system Python. For simple prompts over SSH, use `sh install.sh --plain` instead.
 
-**Termux:** use native Termux Python, never a glibc Linux installer/binary. Install the native CLI through its supported Termux route. If building Python dependencies requires libraries:
+After installation, make the command available in your current shell:
 
 ```sh
-pkg install python git clang rust libjpeg-turbo libpng libffi openssl pkg-config
-sh install.sh --plain
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-This repository is developed on native Termux/Python 3.14. Linux is covered by CI. macOS/WSL use the same Python source-install route but have not been verified on real devices; native Windows service management is unsupported. Android background/autostart/battery settings can still stop a phone-hosted bot.
+Add that export line once to your shell startup file (`~/.bashrc` or `~/.zshrc`) for future terminals. You can always run `~/.local/bin/brodar` directly.
 
-The resumable wizard configures:
+### 4. Finish the resumable wizard
 
-1. Codex or Claude, an explicit model, and dedicated runtime login.
-2. Your BotFather token (hidden input; checked using `getMe`). Active webhooks are reported, never deleted automatically.
-3. **One primary owner** by numeric Telegram ID, entered in the trusted local setup terminal.
-4. Neon through your authenticated **operator** MCP or an existing private admin-URI file. The deterministic setup applies repository migrations and creates a restricted runtime role; no model composes SQL or receives admin credentials.
-5. Private Markdown prompts, aliases, timezone and file budgets.
+The wizard walks through:
 
-For operator MCP setup, the wizard can register and log in to Neon. SSH users can use:
+1. Brain, explicit model, reasoning effort and dedicated provider sign-in.
+2. Telegram token validation and your primary owner's numeric ID.
+3. Neon project/branch/database selection, migrations and restricted runtime role.
+4. Persona Markdown, aliases, timezone and local/permanent file budgets.
+5. Connection checks and a choice to start in the foreground, start in the background, or start later.
+
+It saves progress. If interrupted, run `brodar onboard --resume`. Change individual sections later with `brodar configure brain`, `telegram`, `owner`, `neon`, `persona` or `budgets`.
+
+For Neon you can choose either:
+
+- **Authenticated operator MCP:** the wizard can register and log in to Neon through Codex. For manual setup or SSH, use the commands below, complete the browser authorization, then run `brodar setup-neon`.
+- **Existing database:** put its admin connection URI in a private file (`chmod 600`), then select the connection-file route or run `brodar setup-neon --admin-url-file /private/path/admin-uri`. This works with either brain. Do not paste the URI into shell arguments.
 
 ```sh
 codex mcp add neon --url https://mcp.neon.tech/mcp
@@ -43,27 +90,91 @@ codex mcp login neon --no-browser
 brodar setup-neon
 ```
 
-Your selected project/branch/database and resource summary are shown before writes. Setup never upgrades your plan or silently picks the first project. If MCP permissions exclude provisioning, grant the needed permissions or choose the private connection-file path. OAuth, project creation and actual model quality depend on the user's accounts; skipped live checks are labelled unverified.
+Setup shows the concrete resource summary before writes; it does not upgrade a paid plan. Browser authorization and BotFather steps require you. Permanent object storage, research delegation and encrypted backups are optional; ordinary local files work without object storage.
+
+### 5. Start and talk to it
+
+If you chose “start later” in onboarding:
 
 ```sh
-brodar onboard --resume
-brodar configure brain
-brodar configure telegram
-brodar configure owner
-brodar configure persona
-brodar configure budgets
-brodar doctor --json
-brodar run                      # foreground worker, explicit and noninteractive
-brodar service start            # packaged supervisor
+brodar service start
 brodar service status
-brodar service logs
-brodar service stop
-brodar tui                      # attach; closing it leaves the worker running
+brodar doctor --json
+brodar tui
 ```
 
-The TUI provides Overview, private terminal Chat, Connections, Groups, Memory, Jobs, Skills, Persona/Settings and sanitized Logs. Tab switches views; F5 refreshes; `/configure [section]` edits through onboarding; Ctrl-Q detaches. It uses a private local socket, never a second Telegram poller. Settings changes take effect after a controlled worker restart. Bare `brodar` opens onboarding or the TUI only in an interactive terminal; service scripts must use `brodar run`.
+DM your bot from the configured owner account. For a group, add the bot and send `/approve` from that same owner account. Other group members can then use it. Configure BotFather `/setprivacy` to **Disable** for ambient group reception, or give the bot suitable Telegram administrator access. Re-add it if Telegram requires that change to take effect. Administrator tools also need the corresponding Telegram permissions.
 
-Optional platform launchers: `brodar service install` writes a Termux:Boot or Linux user-service launcher. Choose one process manager. Do not start both systemd and the built-in supervisor.
+## Run, stop and open the TUI
+
+| Goal | Command |
+| --- | --- |
+| Start in the background | `brodar service start` |
+| Stop background worker and brain | `brodar service stop` |
+| Apply changes / restart | `brodar service restart` |
+| Check managed process | `brodar service status` |
+| Check actual connections/readiness | `brodar doctor --json` |
+| Read recent sanitized logs | `brodar service logs` |
+| Open terminal dashboard/chat | `brodar tui` |
+| Run in the foreground | `brodar run` (Ctrl-C stops it) |
+| Reopen setup | `brodar onboard --resume` |
+| Change model/brain | `brodar configure brain`, then restart |
+| Sign in to the dedicated brain | `brodar login` |
+| All commands and flags | `brodar --help` or `brodar -h` |
+| Service command help | `brodar service --help` |
+| Installer help before any environment exists | `sh install.sh --help` |
+
+The TUI has Overview, private terminal Chat, Connections, Groups, Memory, Jobs, Skills, Settings/Persona and Logs. Tab switches views, F5 refreshes, Ctrl-Q detaches. `/configure [section]`, `/doctor` and `/restart` are available inside it. **Detaching leaves the bot running.** Bare `brodar` opens setup or the TUI in an interactive terminal. `brodar tui` attaches to an existing worker; start the worker first.
+
+`service start` uses the packaged supervisor and does not require a desktop terminal to stay open. A “started” PID alone is not readiness: use `doctor`. Only run one worker per bot. Foreground workers must be stopped with Ctrl-C in their own terminal; externally managed workers must use their process manager.
+
+### Start after a reboot (optional)
+
+`brodar service install` writes a platform launcher; installing it does not immediately start the bot.
+
+- **Termux:** install/enable the Termux:Boot app from the same trusted source as Termux, open it once, and allow background/autostart. The generated boot script runs the Brodar supervisor. Android can still stop/throttle it.
+- **Linux systemd user service:** first `brodar service stop`, then `brodar service install`, `systemctl --user daemon-reload`, and `systemctl --user enable --now brodar`. Use `systemctl --user status brodar`, `restart brodar` and `stop brodar` for this mode. To survive logout, your system may require the operator to enable user lingering.
+
+Choose **one** process manager. Do not start the built-in supervisor alongside the systemd worker. `brodar service stop` refuses to kill an unrelated/externally managed worker.
+
+## Update
+
+From your source checkout:
+
+```sh
+git pull --ff-only
+sh install.sh --no-onboard
+brodar service restart
+brodar doctor --json
+```
+
+For a systemd deployment use `systemctl --user restart brodar` instead of `brodar service restart`. External configuration, secrets, learned memories and private prompts survive reinstalling the package. Check release/migration changes before an update; never point tests at the production database. Edit your persona with `brodar configure persona` rather than modifying the shared engine prompt.
+
+## Uninstall
+
+From your checkout, for a source installation made with `install.sh`:
+
+```sh
+sh uninstall.sh
+```
+
+This stops the managed worker, removes its matching startup launcher, removes `~/.local/bin/brodar` and its marked virtual environment. **It keeps** configuration, runtime files, recovery keys, this source checkout, brain CLIs and all Neon/cloud data. No Codex session hunting is needed. A custom install must use the same `BRODAR_INSTALL_VENV` value; select another instance with `sh uninstall.sh --profile /path/profile.json`.
+
+If using systemd, first run `systemctl --user disable --now brodar`; after uninstall run `systemctl --user daemon-reload`. For an older unmarked source installation, run `sh install.sh --no-onboard` first so ownership is recorded. For a manually installed venv, stop its worker and run that environment's `python -m pip uninstall brodar`; its environment is yours to remove.
+
+To also erase local data, **first export anything you want to keep and stop every instance**. Then delete the intended configuration directory (default `~/.config/brodar`), runtime directory (default `~/.local/share/brodar`) and cloned checkout yourself. This also destroys local prompts, provider sessions, temporary files and potentially your only recovery key. Separate profiles may use different paths. Cloud chats/files/backups and billing resources are separate: remove only the intended project/database/bucket through Neon after reviewing what else shares it. Uninstall does not delete a Telegram bot; revoke/remove it through BotFather if desired.
+
+## Troubleshooting
+
+- **`brodar: command not found`:** run `export PATH="$HOME/.local/bin:$PATH"` or use `~/.local/bin/brodar`.
+- **Missing brain executable:** install the chosen Codex/Claude CLI for your platform and check its `--version`, then `brodar login`.
+- **Stopped / no replies:** `brodar service status`, `brodar doctor --json`, then `brodar service logs`. In systemd mode use `systemctl --user status brodar` and `journalctl --user -u brodar`.
+- **No group messages:** approve the group as owner, check BotFather privacy/admin permissions, and make sure another host is not polling the same bot.
+- **Authorization incomplete over SSH:** finish the displayed browser/device flow. Dedicated Brodar login and operator Neon MCP login are separate.
+- **Lost setup terminal:** `brodar onboard --resume --plain`.
+- **Wrong profile:** every command accepts `--profile /path/profile.json`; consistently use the same profile for start/stop/TUI/configuration.
+- **Package build failed on Termux:** install the native compiler/libraries above; do not replace Android Python with desktop Linux wheels.
+- **Need options:** `brodar --help`, `sh install.sh --help`, `sh uninstall.sh --help`.
 
 ## Telegram groups and capabilities
 
@@ -93,7 +204,7 @@ brodar profile export --output /private/path/profile-export
 brodar profile import --archive /private/path/profile-export/profile.json --profile /private/path/new/profile.json
 ```
 
-Exports exclude secrets/auth. Keep private customization repos separate from the engine; pin the engine revision and skill source commits. Encrypt credential recovery backups separately and keep decryption keys elsewhere. Never copy rotating provider OAuth sessions into competing profiles.
+Exports exclude secrets/auth. A private deployment repository may contain the complete engine plus its own portable configuration and prompts; keep it private, preserve upstream provenance and pin skill source commits. Encrypt credential recovery backups separately and keep decryption keys elsewhere. Never copy rotating provider OAuth sessions into competing profiles.
 
 ## Development
 

@@ -31,6 +31,19 @@ def service(cfg,action):
     if action=='status':return {'running':running,'managed':bool(saved),'status_file':str(state/'status.json'),'foreground_control_available':socket_path(cfg).exists()}
     if action=='logs':
         path=state/'service.log';return {'log':scrub(path.read_text(errors='replace')[-16000:]) if path.exists() else ''}
+    if action=='uninstall':
+        if running or socket_path(cfg).exists():
+            raise RuntimeError('Stop this worker before removing its startup launcher: brodar service stop')
+        removed=[]
+        for launcher in (Path.home()/'.termux/boot/brodar',Path.home()/'.config/systemd/user/brodar.service'):
+            if not launcher.exists():continue
+            text=launcher.read_text()
+            # Never remove another profile's or another application's launcher.
+            import shlex
+            if 'brodar' not in text or not any(str(cfg.profile_path) in shlex.split(line.replace('%%','%')) for line in text.splitlines()):
+                raise RuntimeError('Startup launcher belongs to another profile; remove it with that profile')
+            launcher.unlink();removed.append(str(launcher))
+        return {'removed':removed,'data_deleted':False,'note':'If using systemd, disable --now brodar first and run systemctl --user daemon-reload afterward'}
     if action=='install':
         # Install an inert platform launcher. Starting it is a separate explicit command.
         import shutil
@@ -78,4 +91,4 @@ def service(cfg,action):
         if not start:raise RuntimeError('Supervisor did not start; see private supervisor-console.log')
         atomic_private(record,json.dumps({'pid':proc.pid,'start_time':start,'profile':str(cfg.profile_path)}))
         return {'started':True,'pid':proc.pid,'ready':False,'note':'Use doctor/status to verify actual readiness'}
-    raise ValueError('Choose install/start/stop/restart/status/logs')
+    raise ValueError('Choose install/uninstall/start/stop/restart/status/logs')

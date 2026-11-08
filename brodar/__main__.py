@@ -11,7 +11,34 @@ from .settings import Settings
 
 
 def main():
-    parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.')
+    parser=argparse.ArgumentParser(prog='brodar',description='Brodar Telegram companion: selectable Claude/Codex brains and automatic learning.', formatter_class=argparse.RawDescriptionHelpFormatter, epilog='''GET STARTED
+  brodar onboard --plain          Resumable setup (SSH friendly)
+  brodar service start            Run in the background
+  brodar tui                      Open the terminal dashboard/chat
+
+DAILY COMMANDS
+  brodar service status           Check managed worker status
+  brodar service restart          Drain and restart the worker
+  brodar service stop             Stop the worker and its brain subprocess
+  brodar service logs             Read recent sanitized logs
+  brodar run                      Foreground mode; Ctrl-C stops it
+  brodar doctor --json            Check connections and readiness
+  brodar configure brain          Change brain/model configuration
+  brodar login                    Authorize the dedicated brain profile
+
+HELP AND REMOVAL
+  brodar --help                    Show all commands and flags
+  brodar service --help            Show service actions below
+  sh uninstall.sh                 Remove a source install; keep data/config
+  brodar service install          Write an optional boot/service launcher
+  brodar service uninstall        Remove this profile's matching launcher
+
+Service actions: start, stop, restart, status, logs, install, uninstall.
+Configure sections: brain, telegram, owner, neon, persona, budgets.
+Profile: export --output DIRECTORY; import --archive PROFILE_JSON.
+All commands accept --profile PATH for a separate instance.
+Full installation, updates, platform launchers and removal: README.md.
+''')
     parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','hyperagent-login','hyperagent-status','backup','restore','forget-history','setup-storage','onboard','configure','setup-neon','profile','service','tui'],default=None)
     parser.add_argument('target',nargs='?')
     parser.add_argument('--profile',type=Path)

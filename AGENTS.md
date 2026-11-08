@@ -120,3 +120,6 @@ Keep implemented/tested/deployed/published status distinct. When changing code, 
 
 
 Post-release corrections: managed restart now clears the old running flag after drain; focused regression and real restart succeeded. Owner jobs and terminal foreground work are also part of the idle predicate; terminal input preempts learning. This prevents reflection/cleanup treating detached owner work or local chat as idle. Root AGENTS.md/CLAUDE.md are the sole active development handoff; redundant legacy .claude/CLAUDE.md was removed. Hosted Actions were refused before jobs started because the account reported a billing/spending restriction; local checks are the validation evidence until that external restriction clears.
+
+
+Installation handoff correction: README now starts from OS prerequisites and download, with a numbered quickstart, dedicated brain login, Neon paths, TUI, help, start/stop/reboot, updates, uninstall and troubleshooting. `install.sh --help` works before any environment exists; `--no-onboard` supports updates. `uninstall.sh` removes only a marked source environment/matching CLI after stopping the worker; it preserves all data and cloud resources. Service launcher uninstall checks profile ownership. Private deployments may contain the full engine plus a private instance directory; do not force operators to assemble code and configuration manually.
