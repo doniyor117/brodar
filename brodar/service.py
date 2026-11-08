@@ -59,6 +59,7 @@ def service(cfg,action):
             if identity(saved['pid'])==saved.get('start_time'):raise RuntimeError('Service has not drained yet; no replacement started')
         elif socket_path(cfg).exists():raise RuntimeError('A foreground/external worker exists; stop it through its actual process manager')
         if action=='stop':return {'stopped':True}
+        running=False  # The old process has drained; restart must actually spawn its replacement.
     if action in {'start','restart'}:
         if running:return {'running':True,'already_started':True}
         if socket_path(cfg).exists():raise RuntimeError('Existing worker/control socket detected; diagnose before starting another poller')

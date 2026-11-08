@@ -154,3 +154,20 @@ async def test_tui_detaches_cleanly_on_narrow_phone_terminal(tmp_path,monkeypatc
             task=asyncio.create_task(tui(SimpleNamespace(runtime_dir=tmp_path)))
             await asyncio.sleep(.1);pipe.send_text('\x11')
             await asyncio.wait_for(task,2)
+
+
+def test_managed_restart_starts_replacement_instead_of_reusing_old_running_flag(tmp_path,monkeypatch):
+    from brodar.service import service
+    state=tmp_path/'runtime';state.mkdir()
+    (state/'managed-service.json').write_text(json.dumps({'pid':11,'start_time':'old'}))
+    alive={11:'old',22:'new'}
+    monkeypatch.setattr('brodar.service.identity',lambda pid:alive.get(pid))
+    def kill(pid,signum):alive.pop(pid,None)
+    monkeypatch.setattr('brodar.service.os.kill',kill)
+    popen=SimpleNamespace(pid=22)
+    from unittest.mock import Mock
+    launcher=Mock(return_value=popen);monkeypatch.setattr('brodar.service.subprocess.Popen',launcher)
+    cfg=SimpleNamespace(runtime_dir=state,profile_path=tmp_path/'profile.json',backup_admin_file=None,backup_key_file=None,storage_config=None,backup_interval_seconds=1209600)
+    result=service(cfg,'restart')
+    assert result['started'] is True and result['pid']==22
+    assert launcher.call_count==1 and service(cfg,'status')['running'] is True
