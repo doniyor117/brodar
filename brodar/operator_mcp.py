@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from .brains.rpc import RpcProcess
+from .brains.rpc import RpcProcess,RpcError
 from .brains.codex import app_server_argv
 
 class OperatorMcp:
@@ -52,11 +52,16 @@ class OperatorMcp:
                 await asyncio.sleep(1)
             if not self.tools:raise RuntimeError('Neon MCP unavailable (auth '+auth_status+'). Run codex mcp login '+self.server+' --no-browser; also check granted scopes')
             return self
+        except RpcError as exc:
+            await self.__aexit__(None,None,None)
+            if exc.code in {-32601,-32602}:raise RuntimeError('Installed Codex CLI does not support the direct setup MCP protocol. Upgrade Codex or use connection-file Neon setup; no inference fallback was used') from None
+            raise RuntimeError('Operator MCP transport failed; check CLI version, authorization and server permissions') from None
         except BaseException:
             await self.__aexit__(None,None,None);raise
     async def call(self,tool,arguments=None):
         if tool not in self.tools:raise PermissionError('Authorized Neon MCP does not expose '+tool+'; check read-only/role-pinned scopes')
-        result=await self.rpc.request('mcpServer/tool/call',{'threadId':self.thread,'server':self.server,'tool':tool,'arguments':arguments or {}},timeout=120)
+        try:result=await self.rpc.request('mcpServer/tool/call',{'threadId':self.thread,'server':self.server,'tool':tool,'arguments':arguments or {}},timeout=120)
+        except RpcError:raise RuntimeError('Direct MCP tool call unsupported or failed; upgrade CLI/check grants or choose the connection-file setup path') from None
         if result.get('isError'):raise RuntimeError('Neon MCP tool failed: '+tool+' (details withheld)')
         if result.get('structuredContent') is not None:return result['structuredContent']
         text='\n'.join(block.get('text','') for block in result.get('content',[]) if block.get('type')=='text')
