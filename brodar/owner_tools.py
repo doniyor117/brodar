@@ -41,6 +41,15 @@ def classify_owner(argv,root):
     return {'kind':'owner_command','argv':argv,'workspace':str(root)},risky
 
 
+def workspace_budget(root,budget):
+    total=0
+    for file in root.rglob('*'):
+        if file.is_symlink() or not file.is_file():continue
+        size=file.stat().st_size;total+=size
+        if size>50_000_000:raise ValueError('Owner workspace file exceeds 50 MB; split/remove it before retrying')
+        if total>budget:raise ValueError('Owner scratch budget exceeded; clean temporary work or adjust the owner budget')
+
+
 class OwnerJobs:
     def __init__(self,cfg,bot,lease):self.cfg,self.bot,self.lease=cfg,bot,lease;self.tasks={};self.semaphore=asyncio.Semaphore(1)
     async def submit(self,broker,request_id,argv,operation,approval_id=None,timeout=900):
@@ -113,14 +122,7 @@ class OwnerJobs:
             async def monitor():
                 while proc.returncode is None:
                     await asyncio.sleep(3);await self._valid(store,payload)
-                    def disk_policy():
-                        total=0
-                        for file in root.rglob('*'):
-                            if file.is_symlink() or not file.is_file():continue
-                            size=file.stat().st_size;total+=size
-                            if size>50_000_000:raise ValueError('Owner workspace file exceeds 50 MB; split/remove it before retrying')
-                            if total>getattr(self.cfg,'temp_budget_bytes',500_000_000):raise ValueError('Owner scratch budget exceeded; clean temporary work or adjust the owner budget')
-                    await asyncio.to_thread(disk_policy)
+                    await asyncio.to_thread(workspace_budget,root,getattr(self.cfg,'temp_budget_bytes',500_000_000))
                     def cancelled():
                         with store.db.transaction(store.scope.audience,readonly=True) as c:
                             c.execute('SELECT status FROM brodar_v2.jobs WHERE audience=%s AND id=%s',(store.scope.audience,uid));row=c.fetchone();return not row or row[0]=='cancelled'
@@ -130,10 +132,12 @@ class OwnerJobs:
                 async with asyncio.timeout(payload['timeout']):
                     # Monitor exceptions must interrupt the process, not be silently discarded.
                     wait=asyncio.create_task(proc.wait())
-                    done,_=await asyncio.wait([wait,*readers],return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:task.result()
-                    if wait not in done:await asyncio.gather(wait,readers[0])
-                    else:await readers[0]
+                    pending={wait,*readers}
+                    while wait in pending:
+                        done,pending=await asyncio.wait(pending,return_when=asyncio.FIRST_COMPLETED)
+                        for task in done:task.result()
+                    await readers[0]
+                    await asyncio.to_thread(workspace_budget,root,getattr(self.cfg,'temp_budget_bytes',500_000_000))
                 await self._valid(store,payload);exit_code=proc.returncode;status='done' if exit_code==0 else 'failed'
             finally:
                 for task in readers:task.cancel()
