@@ -107,7 +107,12 @@ async def wizard(path=None,*,plain=False,advanced=False,section=None,non_interac
                         brain=await q.ask('Brain (codex/claude)',settings.get('BRODAR_BRAIN','codex'))
                         if brain not in {'codex','claude'}:raise ValueError('Choose codex or claude')
                         engine.set('BRODAR_BRAIN',brain)
-                        model=await q.ask('Model identifier',settings.get('BRODAR_'+brain.upper()+'_MODEL','gpt-6-luna' if brain=='codex' else 'claude-sonnet-4-6'))
+                        if brain=='codex' and await q.yes('Show models/efforts available to the dedicated Codex login?'):
+                            from .models import codex_models
+                            try:
+                                for entry in await codex_models(Settings.load(profile=engine.path)):print(entry['id'],entry['name'],entry['efforts'])
+                            except Exception:print('Model catalogue unavailable. Choose an explicit identifier and finish login; no inference was run.')
+                        model=await q.ask('Model identifier' ,settings.get('BRODAR_'+brain.upper()+'_MODEL','gpt-6-luna' if brain=='codex' else 'claude-sonnet-4-6'))
                         engine.set('BRODAR_'+brain.upper()+'_MODEL',model)
                         engine.set('BRODAR_'+brain.upper()+'_EFFORT',await q.ask('Reasoning effort',settings.get('BRODAR_'+brain.upper()+'_EFFORT','low' if brain=='codex' else 'high')))
                         if brain=='codex' and advanced:
