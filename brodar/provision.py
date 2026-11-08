@@ -30,6 +30,7 @@ async def provision_runtime(db:Postgres,admin_uri:str,*,role:str,password:str|No
                 if any(c.fetchone()):
                     raise RuntimeError('Existing runtime role has excessive privileges')
             c.execute(f'GRANT USAGE ON SCHEMA brodar_v2 TO "{role}"')
+            c.execute(f'GRANT SELECT ON brodar_v2.schema_migrations TO "{role}"')
             for table in TABLES:
                 c.execute(f'GRANT SELECT,INSERT,UPDATE,DELETE ON brodar_v2.{table} TO "{role}"')
     await db.run(provision)

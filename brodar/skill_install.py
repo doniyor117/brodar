@@ -29,8 +29,9 @@ def manage(root,action,name,source=None,ref='HEAD',subdirectory='.'):
     def git(*args):
         return subprocess.check_output(['git','-c','core.hooksPath=/dev/null',*args],stderr=subprocess.DEVNULL,text=True,timeout=120).strip()
     with tempfile.TemporaryDirectory(prefix='.install-',dir=root) as stage:
-        repo=Path(stage)/'source';git('clone','--no-checkout','--filter=blob:none','--',source,str(repo))
-        git('-C',str(repo),'checkout','--detach',ref)
+        repo=Path(stage)/'source';git('clone','--depth','1','--no-checkout','--filter=blob:none','--',source,str(repo))
+        if ref!='HEAD':git('-C',str(repo),'fetch','--depth','1','origin',ref)
+        git('-C',str(repo),'checkout','--detach','FETCH_HEAD' if ref!='HEAD' else 'HEAD')
         commit=git('-C',str(repo),'rev-parse','HEAD')
         src=repo/subdirectory
         if not src.is_dir() or not src.resolve().is_relative_to(repo):raise ValueError('Skill directory unavailable')
