@@ -36,6 +36,8 @@ async def tui(cfg):
             try:
                 if text.startswith('/configure'):
                     exit_action=('configure',text.partition(' ')[2] or None);app.exit();return
+                if text=='/restart':
+                    exit_action=('restart',None);app.exit();return
                 if text=='/doctor':
                     from .diagnostics import diagnose
                     body.text=json.dumps(await diagnose(cfg),indent=2,default=str);return
@@ -72,5 +74,10 @@ async def tui(cfg):
         for task in pending:task.cancel()
         await asyncio.gather(updater,*pending,return_exceptions=True)
     if exit_action:
-        from .onboarding import wizard
-        await wizard(cfg.profile_path,section=exit_action[1]);print('Settings saved. Apply with brodar service restart when appropriate.')
+        if exit_action[0]=='restart':
+            from .service import service
+            from .settings import Settings
+            print(json.dumps(await asyncio.to_thread(service,Settings.load(profile=cfg.profile_path),'restart'),indent=2))
+        else:
+            from .onboarding import wizard
+            await wizard(cfg.profile_path,section=exit_action[1]);print('Settings saved. Apply with brodar service restart or /restart from the TUI.')

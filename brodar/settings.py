@@ -105,6 +105,7 @@ class Settings:
         if min(cfg.temp_budget_bytes,cfg.retained_budget_bytes,cfg.backup_budget_bytes)<50_000_000:raise ValueError('Storage budgets must be at least one 50 MB file')
         if cfg.followup_seconds<0 or min(cfg.temp_idle_seconds,cfg.cleanup_interval_seconds,cfg.backup_interval_seconds)<1:raise ValueError('Invalid lifecycle timing')
         if cfg.auto_compact_token_limit is not None and cfg.auto_compact_token_limit<1000:raise ValueError('Compaction threshold must be at least 1000 tokens')
+        if any(uid<=0 or uid>=2**63 for uid in cfg.owner_ids):raise ValueError('Owner IDs must be positive Telegram numeric user IDs')
         if cfg.research_transport not in {'disabled','hyperagent_mcp'}:raise ValueError('Choose disabled or hyperagent_mcp research transport')
         if cfg.maintenance_idle_seconds<1:raise ValueError('Idle window must be positive')
         if cfg.consolidation_interval<60 or cfg.maintenance_timeout<1:raise ValueError('Invalid maintenance timing')
