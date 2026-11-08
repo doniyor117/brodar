@@ -31,7 +31,8 @@ async def database_command(args):
             try:
                 if args.command=='backup':
                     from .backups import prune_managed
-                    result=await backup(db,objects,key_file=args.recovery_key_file)
+                    from .settings import Settings
+                    result=await backup(db,objects,key_file=args.recovery_key_file,budget_bytes=Settings.load(profile=getattr(args,'profile',None)).backup_budget_bytes)
                     result.update(await prune_managed(db,objects,key_file=args.recovery_key_file))
                     return result
                 if not args.backup_id:raise ValueError('--backup-id is required')

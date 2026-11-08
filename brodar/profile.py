@@ -10,13 +10,19 @@ ALLOWED_PREFIXES=('BRODAR_','TELEGRAM_','GOOGLE_','GEMINI_')
 SECRET_KEYS={'BRODAR_DATABASE_URL','DATABASE_URL','TELEGRAM_BOT_TOKEN','BRODAR_TEST_BOT_API_KEY','GOOGLE_AI_API_KEY','GEMINI_API_KEY'}
 
 
+def sync_directory(path):
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+    try:os.fsync(fd)
+    finally:os.close(fd)
+
+
 def atomic_private(path,body):
     path=Path(path).expanduser();path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix='.'+path.name+'.',dir=path.parent)
     try:
         with os.fdopen(fd,'w') as output:
             os.fchmod(output.fileno(),0o600);output.write(body);output.flush();os.fsync(output.fileno())
-        os.replace(tmp,path)
+        os.replace(tmp,path);sync_directory(path.parent)
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
 
@@ -46,7 +52,7 @@ def write_profile(path,value):
     try:
         atomic_private(temp,json.dumps(value,indent=2,ensure_ascii=False)+'\n')
         read_profile(temp)
-        os.replace(temp,path)
+        os.replace(temp,path);sync_directory(path.parent)
     finally:
         if os.path.exists(temp):os.unlink(temp)
 

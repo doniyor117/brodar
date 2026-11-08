@@ -42,9 +42,10 @@ def classify_owner(argv,root):
 
 
 class OwnerJobs:
-    def __init__(self,cfg,bot,lease):self.cfg,self.bot,self.lease=cfg,bot,lease;self.tasks={}
+    def __init__(self,cfg,bot,lease):self.cfg,self.bot,self.lease=cfg,bot,lease;self.tasks={};self.semaphore=asyncio.Semaphore(1)
     async def submit(self,broker,request_id,argv,operation,approval_id=None,timeout=900):
         cap,request,check=owner_request(broker,request_id)
+        if len(self.tasks)>=8:raise ValueError('Owner execution queue is full; wait or cancel a job')
         root=broker.commands.root/'owner';root=root.resolve()
         action,risky=classify_owner(argv,root)
         if risky:
@@ -86,6 +87,10 @@ class OwnerJobs:
         if not row or row[0]!=payload['source_hash'] or row[1]!=payload['requester_id']:raise PermissionError('Owner source changed')
 
     async def _run(self,store,uid,payload):
+        async with self.semaphore:
+            await self._execute(store,uid,payload)
+
+    async def _execute(self,store,uid,payload):
         proc=None;output=bytearray();status='failed';exit_code=None
         async def update(status,extra=None):
             def write():
