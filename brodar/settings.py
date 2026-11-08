@@ -48,6 +48,8 @@ class Settings:
     temp_idle_seconds:int=604800
     cleanup_interval_seconds:int=604800
     backup_interval_seconds:int=1209600
+    backup_admin_file:Path|None=None
+    backup_key_file:Path|None=None
     prompt_dir:Path|None=None
     profile_path:Path|None=None
 
@@ -67,7 +69,9 @@ class Settings:
         model=values.get('BRODAR_'+provider.upper()+'_MODEL',
                          'gpt-6.1-sol' if provider=='codex' else 'claude-sonnet-4-6')
         ids=lambda v:frozenset(int(x.strip()) for x in v.split(',') if x.strip())
-        cfg=cls(profile_path=profile_path,prompt_dir=Path(instance['prompt_dir']) if instance.get('prompt_dir') else None,
+        cfg=cls(backup_admin_file=Path(values['BRODAR_BACKUP_ADMIN_FILE']).expanduser() if values.get('BRODAR_BACKUP_ADMIN_FILE') else None,
+                backup_key_file=Path(values['BRODAR_BACKUP_KEY_FILE']).expanduser() if values.get('BRODAR_BACKUP_KEY_FILE') else None,
+                profile_path=profile_path,prompt_dir=Path(instance['prompt_dir']) if instance.get('prompt_dir') else None,
                 aliases=tuple(x.strip() for x in values.get('BRODAR_ALIASES','brodar,brodar simon,samy,simon,simon bro').split(',') if x.strip()),
                 followup_seconds=float(values.get('BRODAR_FOLLOWUP_SECONDS','120')),
                 temp_budget_bytes=int(values.get('BRODAR_TEMP_BUDGET_BYTES','500000000')),

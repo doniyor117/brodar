@@ -63,10 +63,10 @@ def service(cfg,action):
         if running:return {'running':True,'already_started':True}
         if socket_path(cfg).exists():raise RuntimeError('Existing worker/control socket detected; diagnose before starting another poller')
         profile_parent=cfg.profile_path.parent
-        admin=profile_parent/(cfg.profile_path.stem+'.admin-uri')
+        admin=cfg.backup_admin_file or profile_parent/(cfg.profile_path.stem+'.admin-uri')
         backup_args=[]
         if admin.exists() and cfg.storage_config and cfg.storage_config.exists():
-            backup_args=['--backup-admin-file',str(admin),'--backup-storage-file',str(cfg.storage_config),'--backup-key-file',str(profile_parent/(cfg.profile_path.stem+'.recovery-key.json')),'--backup-interval',str(cfg.backup_interval_seconds)]
+            backup_args=['--backup-admin-file',str(admin),'--backup-storage-file',str(cfg.storage_config),'--backup-key-file',str(cfg.backup_key_file or profile_parent/(cfg.profile_path.stem+'.recovery-key.json')),'--backup-interval',str(cfg.backup_interval_seconds)]
         with (state/'supervisor-console.log').open('a') as out:
             proc=subprocess.Popen([sys.executable,'-m','brodar.service_supervisor',*backup_args,'--profile',str(cfg.profile_path)],stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,start_new_session=True,env={**os.environ,'BRODAR_RUNTIME_DIR':str(state)})
         start=None

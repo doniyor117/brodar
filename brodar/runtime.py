@@ -714,6 +714,12 @@ async def run(cfg):
         from .control import ControlServer
         terminal_session=TerminalSession(cfg,Postgres(cfg.database_url),me.id,semaphore,objects,owner_jobs=owner_jobs,router=router,approvals=approval_service)
         started_at=time.time()
+        usage_snapshot={'usage':{},'as_of':None}
+        def read_usage():
+            with db.transaction(readonly=True) as c:
+                c.execute('SELECT kind,bytes FROM brodar_v2.storage_usage');return dict(c.fetchall())
+        usage_snapshot.update(usage=await db.run(read_usage),as_of=time.time())
+
         async def operator_control(method,params):
             if method=='status':
                 return {'running':True,'started_at':started_at,'brain':cfg.brain,'model':cfg.model,
@@ -721,7 +727,9 @@ async def run(cfg):
                     'typing_conversations':len(presence.tasks),'owner_jobs':len(owner_jobs.tasks),
                     'temp_budget_bytes':cfg.temp_budget_bytes,'retained_budget_bytes':cfg.retained_budget_bytes,
                     'backup_interval_seconds':cfg.backup_interval_seconds,'research':cfg.research_transport,
-                    'model_tested':False}
+                    'model_tested':False,'storage_usage_cached':usage_snapshot,
+                    'backup_schedule':json.loads((cfg.runtime_dir/'backup-schedule.json').read_text()) if (cfg.runtime_dir/'backup-schedule.json').exists() else None,
+                    'cleanup_schedule':json.loads((cfg.runtime_dir/'cleanup-schedule.json').read_text()) if (cfg.runtime_dir/'cleanup-schedule.json').exists() else None}
             if method=='groups':return [{'chat_id':chat} for chat in sorted(access.groups)]
             if method=='chat_send':return await terminal_session.send(str(params.get('text','')))
             if method=='chat_read':return terminal_session.bot.output
