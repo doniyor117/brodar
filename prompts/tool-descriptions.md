@@ -217,3 +217,7 @@ Install/update/remove a skill for a fresh owner request as an asynchronous host 
 
 ## owner_skill_run
 Run a script from any discovered Codex/Claude skill for a fresh authenticated owner request. First read SKILL.md, then supply skill_id, relative script resource, arguments and operation_id. The host copies the checked package into the owner's workspace without auth/plugin configuration and runs it as a tracked job. Supported script types: Python, shell, JavaScript.
+
+
+## workspace_publish
+Import a completed workspace file as a scoped temporary artifact for actual delivery, without passing base64 through model context. Use a relative workspace path, operation_id, optional filename/mime_type and sensitive flag. Maximum 50 MB. Credential paths, symlinks and outside-workspace reads are denied; sensitive paths need exact owner approval. This does not permanently save the file; explicit artifact_retain is separate.

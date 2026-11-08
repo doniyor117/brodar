@@ -459,6 +459,33 @@ def build_tools(broker):
             return result(await broker.artifacts.retain(artifact_id,{'message_id':request.id,'actor':request.actor},check=check,approval_id=approval_id,approvals=broker.approvals))
 
         @mcp.tool()
+        async def workspace_publish(path:str,operation_id:str,filename:str='',mime_type:str='',sensitive:bool=False,approval_id:str|None=None)->str:
+            import mimetypes,hashlib,os
+            from pathlib import Path
+            from .redaction import scrub
+            cap=broker.require(visible=True)
+            action,needed=broker.commands.classify(['cat',path])
+            if needed:
+                if not broker.approvals or not approval_id:raise PermissionError('Sensitive workspace file requires exact owner DM approval')
+                await broker.approvals.consume_action(broker.store.scope,approval_id,action)
+            source=broker.commands.root/path
+            def check():
+                if broker.capability is not cap:raise PermissionError('Workspace publish turn revoked')
+            def read():
+                check();fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+                with os.fdopen(fd,'rb') as file:
+                    if os.fstat(file.fileno()).st_size>50_000_000:raise ValueError('File exceeds 50 MB')
+                    body=file.read(50_000_001)
+                    if len(body)>50_000_000:raise ValueError('File exceeds 50 MB')
+                    return body
+            body=await asyncio.to_thread(read);check()
+            filename=filename or Path(path).name;mime_type=mime_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            if mime_type.startswith('text/'):
+                text=body.decode('utf-8')
+                if scrub(text)!=text:raise PermissionError('Credential-like workspace contents cannot be published')
+            return result(await broker.artifacts.put(turn_id=cap.turn_id,operation_id=operation_id,filename=filename,mime=mime_type,body=body,request_hash=hashlib.sha256(body+filename.encode()+mime_type.encode()).hexdigest(),metadata={'sensitive':sensitive,'source':'workspace'}))
+
+        @mcp.tool()
         async def workspace_checkout(artifact_id:str,approval_id:str|None=None)->str:
             cap=broker.require(visible=True)
             if not hasattr(broker,'commands'):raise RuntimeError('Workspace unavailable')
