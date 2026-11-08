@@ -90,11 +90,11 @@ Ask owner in DM for an allowed command requiring approval. Denied commands and c
 
 ## skills_list
 
-Discover installed Codex and Claude skills by topic; instructions do not grant extra tools or access.
+Discover installed Codex and Claude skills by topic. Use query with the requested skill name instead of listing the whole library. Returns exact IDs and installed folder names; instructions do not grant extra tools or access.
 
 ## skill_read
 
-Read installed skill instructions or bundled references/scripts progressively. Scripts are data, not executed.
+Read installed skill instructions or bundled references/scripts progressively. skill_id accepts an exact ID from skills_list or a unique installed folder name. Returns canonical skill_id. Scripts are data, not executed; use owner_skill_run/owner_execute for an authenticated owner's actual execution.
 
 ## now
 
@@ -102,7 +102,7 @@ Current UTC time, for interpreting dates and stale context.
 
 ## create_presentation
 
-Create a real editable PPTX in durable scoped storage. Returns artifact_id; send it with telegram_send_document.
+Create a real editable PPTX using a basic fixed navy text template in temporary scoped storage. Notes are speaker notes; they do not control design. For skill-based presentations/custom visual layouts use owner_skill_run/owner_execute instead of silently substituting this template. Returns artifact_id; send it with telegram_send_document.
 
 ## create_file
 
@@ -212,11 +212,11 @@ Fetch a scoped owner job's actual output/status or cancel it, authorized by a fr
 
 
 ## owner_skill
-Install/update/remove a skill for a fresh owner request as an asynchronous host job. Use a public GitHub HTTPS source and the directory containing SKILL.md; source/ref/resolved commit are recorded. Skill installation does not execute its scripts. Read the installed instructions before running scripts through owner_execute.
+Install/update/remove a skill for a fresh owner request as an asynchronous host job. Use a public GitHub HTTPS source. With subdirectory="." the installer discovers a unique nested SKILL.md or a uniquely matching skill folder; an ambiguous repository returns the candidate paths for selection. Explicit subdirectory selects the exact folder. Source/ref/resolved commit and actual folder are recorded. Skill installation does not install runtime dependencies or execute scripts. Read the installed instructions before running scripts through owner_execute or owner_skill_run. Queued is not installed: report the actual completion receipt or failure reason.
 
 
 ## owner_skill_run
-Run a script from any discovered Codex/Claude skill for a fresh authenticated owner request. First read SKILL.md, then supply skill_id, relative script resource, arguments and operation_id. The host copies the checked package into the owner's workspace without auth/plugin configuration and runs it as a tracked job. Supported script types: Python, shell, JavaScript.
+Prepare or run any discovered Codex/Claude skill for a fresh authenticated owner request. First read SKILL.md. skill_id accepts an exact ID or unique installed folder name. resource="" with arguments=[] prepares a checked working copy without execution. Otherwise supply a relative script resource, arguments and operation_id to run a tracked job. Returns skill_workspace_path (relative to workspace_publish), job_working_directory=owner and canonical skill_id. owner_execute command arguments are relative to owner/, so omit that leading component there. Supported scripts: Python, bash/sh (honors bash shebang), Node .js/.mjs/.cjs. Install documented dependencies through owner_execute as needed; do not execute native provider shell or copy auth/plugin configuration.
 
 
 ## workspace_publish

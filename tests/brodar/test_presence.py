@@ -38,3 +38,20 @@ async def test_typing_refreshes_in_correct_topic_and_stops_without_a_chat_messag
     count=len(calls);await asyncio.sleep(.03)
     assert count==len(calls) and not presence.tasks
     assert all(call=={'chat_id':-100,'message_thread_id':12,'action':'typing'} for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_recovered_and_ambient_inputs_gain_feedback_without_stealing_new_work():
+    presence=TypingPresence(SimpleNamespace(send_chat_action=lambda **kw: asyncio.sleep(0)))
+    scope=Scope(99,-100)
+    recovered=presence.claim(scope,[10])
+    assert recovered==1 and presence.for_inputs(scope,[10])==1
+    await presence.stop(scope,generation=recovered)
+    ambient=presence.claim(scope,[11])
+    assert ambient==2
+    await presence.stop(scope,generation=ambient)
+    presence.start(scope,new_work=True,update_id=13)
+    assert presence.claim(scope,[12])==0
+    await presence.stop(scope,generation=0)
+    assert scope.conversation in presence.tasks
+    await presence.close()

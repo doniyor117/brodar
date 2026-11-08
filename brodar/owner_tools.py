@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import shutil
+import sys
 from pathlib import Path
 from uuid import NAMESPACE_URL,uuid5
 from .commands import CREDENTIAL,SENSITIVE
@@ -48,6 +49,45 @@ def workspace_budget(root,budget):
         size=file.stat().st_size;total+=size
         if size>50_000_000:raise ValueError('Owner workspace file exceeds 50 MB; split/remove it before retrying')
         if total>budget:raise ValueError('Owner scratch budget exceeded; clean temporary work or adjust the owner budget')
+
+
+def skill_script_prefix(path):
+    path=Path(path)
+    if path.suffix=='.py':return [sys.executable]
+    if path.suffix in {'.js','.mjs','.cjs'}:return ['node']
+    if path.suffix in {'.sh','.bash'}:
+        with path.open() as script:header=script.readline(200)
+        return ['bash' if path.suffix=='.bash' or (header.startswith('#!') and re.search(r'\bbash\b',header)) else 'sh']
+    raise ValueError('Choose a Python, shell (.sh/.bash) or JavaScript (.js/.mjs/.cjs) script')
+
+
+def check_skill_source(path,relative):
+    # A checked public package may include auth implementation code. That is
+    # different from auth.json, .env, credential directories or embedded secrets.
+    relative=Path(relative)
+    if any(CREDENTIAL.search(part) for part in relative.parts[:-1]):
+        raise PermissionError('Credential-bearing skill directories denied')
+    if not CREDENTIAL.search(relative.name):return
+    if relative.name.startswith('.') or relative.suffix not in {'.py','.js','.mjs','.cjs','.ts','.sh','.bash'} or path.stat().st_size>500_000:
+        raise PermissionError('Credential-bearing skill files denied')
+    text=path.read_text(errors='replace')
+    if scrub(text)!=text:raise PermissionError('Embedded credentials in skill source denied')
+
+
+def job_notification(uid,status,exit_code,payload,output):
+    text='owner task '+status+' (exit '+str(exit_code)+'). job '+uid
+    argv=payload['argv']
+    if len(argv)<5 or argv[1:3]!=['-m','brodar.skill_install']:return text
+    lines=scrub(output).strip().splitlines()
+    if status=='done':
+        try:receipt=json.loads(lines[-1])
+        except (IndexError,ValueError):return text
+        if receipt.get('commit') and receipt.get('subdirectory'):
+            text=f"skill {argv[3]} done: {receipt.get('name',argv[4])}, folder {receipt['subdirectory']}, commit {receipt['commit'][:12]}. job {uid}"
+        elif receipt.get('removed'):text=f"skill removed: {receipt['removed']}. job {uid}"
+    elif lines:
+        text+='\n'+lines[-1][:700]
+    return text
 
 
 class OwnerJobs:
@@ -159,7 +199,7 @@ class OwnerJobs:
                     from .broker import ToolBroker,TurnCapability
                     reporter=ToolBroker(store,self.bot,delivery_guard=lambda:self.lease().require())
                     reporter.begin(TurnCapability(uid))
-                    await reporter.send_message('owner task '+status+' (exit '+str(exit_code)+'). job '+uid,call_id='owner-job-completion')
+                    await reporter.send_message(job_notification(uid,status,exit_code,payload,output.decode(errors='replace')),call_id='owner-job-completion')
                 except Exception:pass  # durable result remains available via owner_job_status
 
     async def cancel_actor(self,store,actor):

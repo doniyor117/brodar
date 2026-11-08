@@ -89,14 +89,16 @@ class ScopedStore:
                                     return parsed if parsed.tzinfo else None
                             except (ValueError,OverflowError,OSError):pass
                             return None
-                        parent_topic=parent.get('message_thread_id')
+                        # Telegram supplies the parent from this same chat/thread.
+                        # Repair legacy reply-chain topic IDs when quoted again.
+                        parent_topic=self.scope.topic_id
                         c.execute('INSERT INTO brodar_v2.messages '
                             '(id,audience,topic_id,platform_message_id,sender_id,sender_name,role,content,sent_at,edited_at,source_id,source_hash,metadata) '
                             'SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb WHERE NOT EXISTS '
                             "(SELECT 1 FROM brodar_v2.forgotten_sources WHERE audience=%s AND source='telegram' AND source_id=%s) "
-                            'ON CONFLICT(audience,source,source_id) DO NOTHING',
+                            'ON CONFLICT(audience,source,source_id) DO UPDATE SET topic_id=excluded.topic_id',
                             (str(uuid5(NAMESPACE_URL,f'{self.scope.audience}:telegram:{parent_id}')),self.scope.audience,
-                             self.scope.topic_id if parent_topic is None else parent_topic,parent_id,parent_sender,
+                             parent_topic,parent_id,parent_sender,
                              author.get('first_name') or author.get('username') or 'anonymous sender',parent_role,parent_text,
                              date(parent.get('date')),date(parent.get('edit_date')),str(parent_id),digest(parent_text),
                              json.dumps({'delivered_as_reply_context':True,'with_update_id':update_id}),self.scope.audience,str(parent_id)))

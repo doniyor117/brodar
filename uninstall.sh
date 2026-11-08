@@ -24,9 +24,10 @@ from pathlib import Path
 env=Path(sys.argv[1]).resolve();launcher=Path(sys.argv[2])
 if env in {Path('/'),Path.home().resolve(),(Path.home()/'.local').resolve(),(Path.home()/'.local/share/brodar').resolve()}:
     raise SystemExit('Unsafe installation path; refusing removal')
-expected='#!/bin/sh\nexec '+shlex.quote(str(Path(sys.argv[1])/'bin/brodar'))+' "$@"\n'
+body='\nexec '+shlex.quote(str(Path(sys.argv[1])/'bin/brodar'))+' "$@"\n'
+expected={'#!/bin/sh'+body,'#!'+(shutil.which('sh') or '/bin/sh')+body}
 if launcher.exists():
-    if launcher.is_symlink() or launcher.read_text()!=expected:raise SystemExit('CLI launcher belongs to another install; refusing removal')
+    if launcher.is_symlink() or launcher.read_text() not in expected:raise SystemExit('CLI launcher belongs to another install; refusing removal')
     launcher.unlink()
 shutil.rmtree(env)
 print('Brodar installation removed. Configuration, runtime files and cloud data were kept.')

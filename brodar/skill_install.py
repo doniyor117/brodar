@@ -2,11 +2,35 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path,PurePosixPath
+
+
+def skill_directory(repo,name,subdirectory):
+    """Prefer the supplied path; discover a unique nested skill for repo-root URLs."""
+    src=repo/subdirectory
+    if subdirectory=='.' and not (src/'SKILL.md').is_file():
+        candidates=[]
+        for base,dirs,files in os.walk(repo,followlinks=False):
+            dirs[:]=sorted(d for d in dirs if d not in {'.git','node_modules','.venv'} and not (Path(base)/d).is_symlink())
+            if 'SKILL.md' in files and not (Path(base)/'SKILL.md').is_symlink():
+                candidates.append(Path(base).relative_to(repo).as_posix())
+                if len(candidates)>100:raise ValueError('Many skills found; specify the exact subdirectory containing SKILL.md')
+        matches=[p for p in candidates if PurePosixPath(p).name in {name,name.removesuffix('-skill')}]
+        if len(candidates)==1:subdirectory=candidates[0]
+        elif len(matches)==1:subdirectory=matches[0]
+        elif candidates:raise ValueError('Multiple skills found; choose subdirectory: '+', '.join(candidates[:20]))
+        else:raise ValueError('No SKILL.md found in this repository')
+        src=repo/subdirectory
+    if not src.is_dir() or not src.resolve().is_relative_to(repo):raise ValueError('Skill directory unavailable')
+    if any(p.is_symlink() for p in (src,*src.parents) if p.is_relative_to(repo)):
+        raise ValueError('Skill symlinks are not accepted')
+    if not (src/'SKILL.md').is_file():raise ValueError('Selected directory needs SKILL.md')
+    return src,src.relative_to(repo).as_posix()
 
 
 def manage(root,action,name,source=None,ref='HEAD',subdirectory='.'):
@@ -33,9 +57,7 @@ def manage(root,action,name,source=None,ref='HEAD',subdirectory='.'):
         if ref!='HEAD':git('-C',str(repo),'fetch','--depth','1','origin',ref)
         git('-C',str(repo),'checkout','--detach','FETCH_HEAD' if ref!='HEAD' else 'HEAD')
         commit=git('-C',str(repo),'rev-parse','HEAD')
-        src=repo/subdirectory
-        if not src.is_dir() or not src.resolve().is_relative_to(repo):raise ValueError('Skill directory unavailable')
-        if not (src/'SKILL.md').is_file():raise ValueError('Selected directory needs SKILL.md')
+        src,subdirectory=skill_directory(repo,name,subdirectory)
         total=0
         for file in src.rglob('*'):
             if '.git' in file.relative_to(src).parts:continue
@@ -59,5 +81,9 @@ def manage(root,action,name,source=None,ref='HEAD',subdirectory='.'):
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('action',choices=['install','update','remove']);parser.add_argument('name');parser.add_argument('--source');parser.add_argument('--ref',default='HEAD');parser.add_argument('--subdirectory',default='.')
-    args=parser.parse_args();print(json.dumps(manage(Path.cwd()/'skills',args.action,args.name,args.source,args.ref,args.subdirectory)))
+    args=parser.parse_args()
+    try:receipt=manage(Path.cwd()/'skills',args.action,args.name,args.source,args.ref,args.subdirectory)
+    except (ValueError,RuntimeError,OSError,subprocess.SubprocessError) as exc:
+        parser.exit(1,'Skill install failed: '+str(exc)+'\n')
+    print(json.dumps(receipt))
 if __name__=='__main__':main()

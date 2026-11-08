@@ -252,19 +252,19 @@ def build_tools(broker):
 
     @mcp.tool()
     async def owner_skill_run(request_message_id:str,skill_id:str,resource:str,arguments:list[str],operation_id:str)->str:
-        import sys,shutil
+        import shutil
         from pathlib import Path,PurePosixPath
         from .skills import LIBRARY
-        from .owner_tools import owner_request
-        from .commands import CREDENTIAL
+        from .owner_tools import owner_request,skill_script_prefix,check_skill_source
         source=getattr(broker,'current',None) or getattr(broker,'baseline',broker)
         cap,request,check=owner_request(source,request_message_id)
-        await LIBRARY.refresh()
-        if skill_id not in LIBRARY.entries:raise ValueError('Unknown skill ID; use skills_list')
-        package=LIBRARY.entries[skill_id]['root'];rel=PurePosixPath(resource)
+        entry=await LIBRARY.resolve(skill_id);skill_id=entry['id']
+        package=entry['root'];rel=PurePosixPath(resource)
         if rel.is_absolute() or '..' in rel.parts or '\\' in resource:raise ValueError('Use a relative skill resource')
         original=(package/resource).resolve()
-        if not original.is_relative_to(package) or not original.is_file() or original.is_symlink():raise ValueError('Skill script unavailable')
+        if resource and (not original.is_relative_to(package) or not original.is_file() or original.is_symlink()):raise ValueError('Skill script unavailable')
+        prefix=skill_script_prefix(original) if resource else None
+        if not resource and arguments:raise ValueError('Preparing a skill does not accept script arguments')
         destination=source.commands.root/'owner'/'skill-sources'/skill_id
         def copy():
             check();total=0
@@ -272,17 +272,18 @@ def build_tools(broker):
                 if '.git' in file.relative_to(package).parts:continue
                 if file.is_symlink():raise PermissionError('Skill symlinks denied')
                 if file.is_file():
-                    if CREDENTIAL.search(file.name):raise PermissionError('Credential-bearing skill files denied')
+                    check_skill_source(file,file.relative_to(package))
                     total+=file.stat().st_size
                     if file.stat().st_size>50_000_000 or total>100_000_000:raise ValueError('Skill package too large')
             destination.mkdir(mode=0o700,parents=True,exist_ok=True)
             shutil.copytree(package,destination,dirs_exist_ok=True,ignore=shutil.ignore_patterns('.git'))
             check()
         await asyncio.to_thread(copy)
+        paths={'skill_id':skill_id,'skill_workspace_path':str(Path('owner/skill-sources')/skill_id),'job_working_directory':'owner'}
+        if not resource:return result(dict(paths,prepared=True,executed=False))
         script=str(Path('skill-sources')/skill_id/resource)
-        prefix={'.py':[sys.executable],'.sh':['sh'],'.js':['node']}.get(original.suffix)
-        if prefix is None:raise ValueError('Choose a Python, shell or JavaScript script')
-        check();return result(await source.owner_jobs.submit(source,request_message_id,[*prefix,script,*arguments],operation_id,timeout=900))
+        check();job=await source.owner_jobs.submit(source,request_message_id,[*prefix,script,*arguments],operation_id,timeout=900)
+        return result(dict(job,**paths))
 
     @mcp.tool()
     async def owner_job_status(request_message_id:str,job_id:str,cancel:bool=False)->str:

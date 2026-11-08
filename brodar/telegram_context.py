@@ -5,6 +5,13 @@ import re
 _NAMES=re.compile(r'(?<!\w)(?:brodar(?:\s+simon)?|simon(?:\s+bro)?|samy)(?!\w)',re.I)
 
 
+def topic_id(message):
+    """Reply-chain IDs in ordinary chats are not forum routing destinations."""
+    if message.get('is_topic_message') or (message.get('chat') or {}).get('is_forum'):
+        return message.get('message_thread_id') or 0
+    return 0
+
+
 def addressed(message,bot_id,username,aliases=None):
     text=message.get('text') or message.get('caption') or ''
     mention=bool(username and re.search(r'@'+re.escape(username)+r'(?!\w)',text,re.I))

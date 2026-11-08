@@ -20,7 +20,8 @@ def test_installer_help_requires_no_python_or_environment(tmp_path):
     assert list(tmp_path.iterdir())==[tools]
 
 
-def test_uninstall_removes_only_marked_install_and_preserves_user_files(tmp_path):
+@pytest.mark.parametrize('native_shell',[False,True])
+def test_uninstall_removes_only_marked_install_and_preserves_user_files(tmp_path,native_shell):
     env=tmp_path/'.local/share/brodar/venv';(env/'bin').mkdir(parents=True)
     (env/'.brodar-install').write_text('brodar-source-install-v1\n')
     (env/'bin/python').symlink_to(sys.executable)
@@ -28,7 +29,7 @@ def test_uninstall_removes_only_marked_install_and_preserves_user_files(tmp_path
     worker=env/'bin/brodar';worker.write_text('#!'+shell+'\nexit 0\n');worker.chmod(0o700)
     import shlex
     launcher=tmp_path/'.local/bin/brodar';launcher.parent.mkdir(parents=True)
-    launcher.write_text('#!/bin/sh\nexec '+shlex.quote(str(worker))+' "$@"\n')
+    launcher.write_text('#!'+(shell if native_shell else '/bin/sh')+'\nexec '+shlex.quote(str(worker))+' "$@"\n')
     config=tmp_path/'.config/brodar';config.mkdir(parents=True);(config/'keep').write_text('keep')
     (env.parent/'files').mkdir();(env.parent/'files/keep').write_text('keep')
     result=subprocess.run([shell,str(ROOT/'uninstall.sh')],env={**os.environ,'HOME':str(tmp_path),'BRODAR_INSTALL_VENV':str(env)},text=True,capture_output=True)

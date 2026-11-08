@@ -19,6 +19,15 @@ class TypingPresence:
         known=self.inputs.get(scope.conversation,{})
         return max((known.get(uid,0) for uid in update_ids),default=0)
 
+    def claim(self,scope,update_ids):
+        """Recover feedback for ambient/restarted work without stealing a newer input."""
+        generation=self.for_inputs(scope,update_ids)
+        if generation:return generation
+        task=self.tasks.get(scope.conversation)
+        if task is not None and not task.done():return 0
+        self.start(scope,new_work=True,update_id=update_ids[-1] if update_ids else None)
+        return self.generation(scope)
+
     def start(self,scope,*,new_work=False,update_id=None):
         if new_work:
             self.generations[scope.conversation]=self.generation(scope)+1

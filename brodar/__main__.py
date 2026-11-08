@@ -17,6 +17,8 @@ def main():
   brodar tui                      Open the terminal dashboard/chat
 
 DAILY COMMANDS
+  brodar status [groups|dm|terminal]  Show session context (default: groups)
+  brodar compact [groups|dm|terminal] Queue provider compaction; status tracks it
   brodar service status           Check managed worker status
   brodar service restart          Drain and restart the worker
   brodar service stop             Stop the worker and its brain subprocess
@@ -43,7 +45,7 @@ Profile: export --output DIRECTORY; import --archive PROFILE_JSON.
 All commands accept --profile PATH for a separate instance.
 Full installation, updates, platform launchers and removal: README.md.
 ''')
-    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','hyperagent-login','hyperagent-status','backup','restore','forget-history','setup-storage','onboard','configure','setup-neon','profile','service','tui'],default=None)
+    parser.add_argument('command',nargs='?',choices=['run','doctor','migrate','provision','import-history','export-history','login','hyperagent-login','hyperagent-status','backup','restore','forget-history','setup-storage','onboard','configure','setup-neon','profile','service','tui','status','compact'],default=None)
     parser.add_argument('target',nargs='?')
     parser.add_argument('--profile',type=Path)
     parser.add_argument('--plain',action='store_true')
@@ -99,6 +101,14 @@ Full installation, updates, platform launchers and removal: README.md.
         if args.brain and args.brain!=args.target:parser.error('Login target and --brain must agree')
         args.brain=args.target
     cfg=Settings.load(env_file=args.env_file,brain=args.brain,profile=args.profile)
+    if args.command in {'status','compact'}:
+        from .control import request
+        from .session_commands import format_status
+        target=args.target or 'groups'
+        if target not in {'groups','dm','terminal'}:parser.error('Choose groups, dm or terminal')
+        result=asyncio.run(request(cfg,'session_'+args.command,{'target':target}))
+        print(json.dumps(result,indent=2) if args.json else format_status(result) if args.command=='status' else result['message'])
+        return
     if args.command=='profile':
         from .profile import export_profile,read_profile,write_profile
         if args.target=='export':

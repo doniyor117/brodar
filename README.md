@@ -373,11 +373,32 @@ To also erase local data, **first export anything you want to keep and stop ever
 
 Only the configured owner may DM the bot. Add it to a group, then send `/approve` **from the owner account** in that group. Everyone in approved groups can use ordinary capabilities. Group administrator status does not confer bot ownership.
 
+### Session context and compaction
+
+Send `/status` in the owner DM or any approved group. It shows the selected brain/model, latest provider-reported context estimate, remaining window and configured automatic compaction threshold. `/status@YourBot` also works. Group status describes the one shared group session; DM status describes the separate owner session. No model call is made. Usage can be unknown after startup/resume until the next provider usage event. Context usage is an estimate based on the last request, **not your subscription quota** or cumulative session token billing.
+
+The owner can send `/compact` in either location. It queues compaction behind an active turn, reports completion back to the same chat and leaves the polling loop responsive. Other group members cannot compact the shared session. Manual compaction currently supports **Codex**; Claude reports unsupported honestly. Compaction itself uses provider quota and does not reset account limits. Codex also compacts automatically; `BRODAR_CODEX_AUTO_COMPACT_TOKEN_LIMIT` configures that threshold for Brodar's provider subprocess only, without editing your global Codex settings. Restart after changing this setting.
+
+The same controls work from the CLI while the worker is running:
+
+```sh
+brodar status                 # shared group session; no inference
+brodar status dm              # owner DM session
+brodar status terminal --json # local terminal session, structured output
+brodar compact               # queue shared group compaction
+brodar compact dm            # queue owner DM compaction
+brodar status                # check the queued compaction result
+```
+
+`brodar service status` checks the managed process; `brodar status` checks its model session. Session controls never create a new brain just to display status. Implementation uses Codex's [app-server token-usage events and thread compaction API](https://learn.chatgpt.com/docs/app-server), waiting for completion rather than treating the initial RPC acknowledgment as success.
+
 For ordinary group-message reception, configure BotFather privacy mode or Telegram administrator access appropriately. Messages received from Telegram are archived; ambient batches avoid inference on every fragment. Direct names, mentions, replies and short recent same-person follow-ups have priority. Bot exchanges have a host-enforced ten-reply limit and can end silently earlier.
 
 Native tools support photos, videos, stickers, animation, voice/audio, files, albums, polls and permitted administrator actions. Sticker grids return short selection handles; inspect a full candidate image and send its handle so copied IDs cannot silently select another sticker. Telegram does not expose a complete arbitrary member list to bots; observed members and explicit lookups are the available sources.
 
 The owner can run Python/shell/Git/package tasks and install public GitHub skills through tracked background host jobs. Ordinary members keep a limited gateway. Exact sensitive/risky commands require an owner-DM approval; credential access, main-prompt changes and known catastrophic commands are denied. There is no second approval/classification model.
+
+To add a skill, send its GitHub repository link and ask Brodar to install it. A single nested skill is discovered automatically; repositories with several skills may need a folder choice. The completion receipt names the installed folder and commit. Then ask Brodar to use that skill for the task. Installation copies instructions and scripts; runtime dependencies are installed separately when needed. Skills remain discoverable after restarting. The owner runner supports Python, bash/sh and Node `.js`/`.mjs`/`.cjs` scripts. The built-in presentation tool is a basic fixed template; custom slide design uses a skill or an owner-run generator.
 
 **Isolation limit:** owner interpreters run under the host OS identity. Path/command checks and output redaction are defense in depth, not a hard sandbox against arbitrary code under that same identity. Use a separate execution identity/host when stronger isolation is required. Never put runtime secrets in source or skill packages.
 

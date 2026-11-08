@@ -42,9 +42,9 @@ mkdir -p "$HOME/.local/bin"
 BRODAR_LAUNCHER="$HOME/.local/bin/brodar"
 # Avoid shell interpolation of paths inside the installed launcher.
 "$BRODAR_ENV_DIR/bin/python" - "$BRODAR_LAUNCHER" "$BRODAR_ENV_DIR/bin/brodar" <<'PY'
-import os,shlex,sys
+import os,shlex,shutil,sys
 with open(sys.argv[1],'w') as output:
-    output.write('#!/bin/sh\nexec '+shlex.quote(sys.argv[2])+' "$@"\n')
+    output.write('#!'+(shutil.which('sh') or '/bin/sh')+'\nexec '+shlex.quote(sys.argv[2])+' "$@"\n')
 os.chmod(sys.argv[1],0o700)
 PY
 printf '%s\n' 'Installed. Run: export PATH="$HOME/.local/bin:$PATH"' 'Help: brodar --help | Dashboard: brodar tui | Background: brodar service start'

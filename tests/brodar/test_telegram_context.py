@@ -1,6 +1,20 @@
 from telegram import Update
 
 from brodar.telegram_context import ordinary_message,public_payload,describe_message
+from brodar.telegram_context import topic_id
+
+
+def test_reply_chain_id_does_not_split_ordinary_group_or_route_typing_into_it():
+    raw={'update_id':1,'message':{'message_id':20,'date':1,'message_thread_id':12,
+        'chat':{'id':-100,'type':'supergroup'},'text':'try again',
+        'reply_to_message':{'message_id':12,'date':1,'chat':{'id':-100,'type':'supergroup'},'text':'hello'}}}
+    message=Update.de_json(raw,None).to_dict()['message']
+    assert message['message_thread_id']==12
+    assert topic_id(message)==0
+    assert topic_id(dict(message,is_topic_message=True))==12
+    assert topic_id(dict(message,chat={'type':'supergroup','is_forum':True}))==12
+    assert topic_id({'chat':{'type':'private'},'message_thread_id':12})==0
+    assert topic_id({'chat':{'type':'private','is_forum':True},'message_thread_id':12})==12
 
 
 def test_new_sdk_unknown_recipient_fields_do_not_become_public_context():

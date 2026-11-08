@@ -30,7 +30,7 @@ from .scope import Scope
 from .objects import ObjectStore
 from .artifacts import Artifacts
 from .recovery import ConsumerLease
-from .telegram_context import ordinary_message,public_payload,describe_message,addressed
+from .telegram_context import ordinary_message,public_payload,describe_message,addressed,topic_id
 from .presence import TypingPresence
 from .telegram_context import FollowupAffinity
 from .moderation import requests as moderation_requests
@@ -378,7 +378,7 @@ class Conversation:
         self._ambient_first=None;self._ambient_last=None
         self.inflight=list(batch)
         if self.presence:
-            self._presence_generation=self.presence.for_inputs(self.store.scope,[r.get('update_id') for r in batch])
+            self._presence_generation=self.presence.claim(self.store.scope,[r.get('update_id') for r in batch])
             if self._presence_generation and self._presence_generation==self.presence.generation(self.store.scope):self.presence.start(self.store.scope)
         self._cancelled=False
         self._turn_id=str(batch[0]['id'])
@@ -543,7 +543,10 @@ async def run(cfg):
     cleanup_db=None
     control_server=None
     terminal_session=None
+    session_commands=None
     presence=TypingPresence(bot)
+    from .skills import LIBRARY
+    LIBRARY.register_owner_roots(cfg.runtime_dir)
     followups=FollowupAffinity(getattr(cfg,"followup_seconds",120))
     objects=ObjectStore.from_file(cfg.storage_config)
     from .approvals import Approvals
@@ -654,7 +657,7 @@ async def run(cfg):
     def foreground_busy():
         active=list(conversations.values())
         if terminal_session and terminal_session.conversation:active.append(terminal_session.conversation)
-        return bool(owner_jobs.tasks) or bool(creating) or bool(dispatch_tasks) or any(c.wake.is_set() or c.inflight or c._turn_lock.locked() for c in active)
+        return bool(session_commands and session_commands.tasks) or bool(owner_jobs.tasks) or bool(creating) or bool(dispatch_tasks) or any(c.wake.is_set() or c.inflight or c._turn_lock.locked() for c in active)
     learning=Maintenance(cfg,make_worker,asyncio.Semaphore(1),foreground_busy)
 
     async def maintain(bot_id):
@@ -716,6 +719,17 @@ async def run(cfg):
         from .terminal import TerminalSession
         from .control import ControlServer
         terminal_session=TerminalSession(cfg,Postgres(cfg.database_url),me.id,semaphore,objects,owner_jobs=owner_jobs,router=router,approvals=approval_service)
+        from .session_commands import SessionCommands,format_status,telegram_command
+        def resolve_session(target):
+            if target=='groups':return shared_groups.resource,shared_groups.lock
+            if target=='terminal':
+                conversation=terminal_session.conversation
+            elif target=='dm':
+                owner=next(iter(cfg.owner_ids))
+                conversation=conversations.get(Scope(me.id,owner,0,cfg.instance_id).conversation)
+            else:raise ValueError('Choose groups, dm or terminal')
+            return conversation,conversation._turn_lock if conversation else None
+        session_commands=SessionCommands(resolve_session,cfg)
         started_at=time.time()
         usage_snapshot={'usage':{},'as_of':None}
         def read_usage():
@@ -724,6 +738,10 @@ async def run(cfg):
         usage_snapshot.update(usage=await db.run(read_usage),as_of=time.time())
 
         async def operator_control(method,params):
+            if method=='session_status':return session_commands.status(params.get('target','groups'))
+            if method=='session_compact':
+                learning.preempt()
+                return session_commands.queue(params.get('target','groups'))
             if method=='status':
                 return {'running':True,'started_at':started_at,'brain':cfg.brain,'model':cfg.model,
                     'groups':len(access.groups),'active_conversations':sum(bool(c.inflight) for c in conversations.values()),
@@ -826,10 +844,11 @@ async def run(cfg):
                     pass  # consumed by host; never authorizes changes through model text
                 elif message is not None and access.accepts(raw_message):
                     sender=message.from_user if message.sender_chat is None else None
-                    scope=Scope(me.id,message.chat_id,message.message_thread_id or 0,cfg.instance_id)
+                    scope=Scope(me.id,message.chat_id,topic_id(raw_message),cfg.instance_id)
+                    host_command=telegram_command(raw_message,me.username)
                     text,service=describe_message(raw_message)
-                    direct=addressed(raw_message,me.id,me.username,getattr(cfg,"aliases",None))
-                    if sender and not sender.is_bot and not service:
+                    direct=not host_command and addressed(raw_message,me.id,me.username,getattr(cfg,"aliases",None))
+                    if sender and not sender.is_bot and not service and not host_command:
                         direct=followups.classify(scope,sender.id,text,direct=direct)
                     if not service and not (sender and sender.is_bot):learning.preempt()
                     if direct and not service and not (sender and sender.is_bot):presence.start(scope,new_work=True,update_id=update.update_id)
@@ -849,7 +868,20 @@ async def run(cfg):
                     if new and not service:
                         if not (sender and sender.is_bot):
                             learning.preempt()
-                        if text.split('@',1)[0].strip()=='/cancel' and sender:
+                        if host_command:
+                            await store.finish_inputs([iid])
+                            target='groups' if scope.chat_id<0 else 'dm'
+                            async def command_reply(content,command_scope=scope,mid=message.message_id):
+                                await lease.require()
+                                if command_scope.chat_id not in access.audiences():return
+                                await bot.send_message(chat_id=command_scope.chat_id,text=content,reply_to_message_id=mid,
+                                    **({'message_thread_id':command_scope.topic_id} if command_scope.topic_id else {}))
+                            if host_command=='status':content=format_status(session_commands.status(target))
+                            elif not sender or sender.id not in cfg.owner_ids:content='only the owner can compact the shared session'
+                            else:content=session_commands.queue(target,command_reply)['message']
+                            try:await command_reply(content)
+                            except Exception as exc:log.warning('Session command acknowledgment unavailable: %s',type(exc).__name__)
+                        elif text.split('@',1)[0].strip()=='/cancel' and sender:
                             conversation=await get_conversation(scope)
                             await conversation.cancel(sender.id)
                             await owner_jobs.cancel_actor(store,sender.id)
@@ -875,6 +907,7 @@ async def run(cfg):
                 if not persisted:await db.run(advance)
     finally:
         if control_server:await control_server.close()
+        if session_commands:await session_commands.close()
         if terminal_session:await terminal_session.close();await terminal_session.db.close()
         await owner_jobs.close()
         if cleanup_worker:

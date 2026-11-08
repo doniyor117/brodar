@@ -63,6 +63,11 @@ class CodexBrain:
         self._texts = {}
         self._waiter = None
         self._transport_closed = False
+        self.token_usage = None
+        self.usage_updated_at = None
+        self.auto_compact_token_limit = auto_compact_token_limit
+        self.compactions = 0
+        self._compact_waiter = None
         argv=app_server_argv(binary)
         if auto_compact_token_limit is not None:
             argv.extend(['-c',f'model_auto_compact_token_limit={auto_compact_token_limit}'])
@@ -79,6 +84,8 @@ class CodexBrain:
 
     async def start(self, session_id: str | None = None):
         self._transport_closed=False
+        self.token_usage=None
+        self.usage_updated_at=None
         self._completed.clear()
         self._texts.clear()
         self.home.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -116,10 +123,22 @@ class CodexBrain:
     def _notification(self, method, params):
         if method=='brodar/transportClosed':
             self._transport_closed = True
+            if self._compact_waiter and not self._compact_waiter.done():
+                self._compact_waiter.set_exception(RuntimeError('Compaction transport closed'))
             if self._waiter and not self._waiter.done():
                 self._waiter.set_result(Outcome('failed',error='transport_closed',session_id=self.session_id))
             return
         if params.get('threadId')!=self.session_id:
+            return
+        if method=='thread/tokenUsage/updated':
+            self.token_usage=copy.deepcopy(params.get('tokenUsage'))
+            self.usage_updated_at=time.time()
+        if method=='item/completed' and params.get('item',{}).get('type')=='contextCompaction':
+            self.compactions+=1
+        if method=='turn/completed' and self._compact_waiter is not None:
+            if not self._compact_waiter.done():
+                if params.get('turn',{}).get('status')=='completed':self._compact_waiter.set_result(True)
+                else:self._compact_waiter.set_exception(RuntimeError('Provider compaction failed'))
             return
         if getattr(self,'_first_event_at',None) is not None and method.startswith(('item/','turn/')):
             logging.getLogger('brodar.metrics').warning('Codex first_event_ms=%d',int((time.monotonic()-self._first_event_at)*1000))
@@ -152,7 +171,7 @@ class CodexBrain:
         return terminal(next(reversed(texts.values()),''),self.session_id)
 
     async def turn(self, text: str) -> Outcome:
-        if self.active_turn or self._starting:
+        if self.active_turn or self._starting or self._compact_waiter is not None:
             raise RuntimeError('A turn is already running')
         if self._transport_closed:
             return Outcome('failed',error='transport_closed',session_id=self.session_id)
@@ -200,6 +219,31 @@ class CodexBrain:
             return True
         except RpcError:
             return False  # caller retains durable input for the next turn
+
+    async def compact(self):
+        """Wait for provider completion, not merely the asynchronous RPC ack.
+
+        Caller holds the same lock used for foreground turns. On ambiguous
+        failure close/resume before releasing it so a stale turn cannot race.
+        """
+        if self.active_turn or self._starting or self._compact_waiter is not None:
+            raise RuntimeError('A turn is already running')
+        if self._transport_closed:raise RuntimeError('Provider disconnected')
+        self._compact_waiter=asyncio.get_running_loop().create_future()
+        try:
+            await self.rpc.request('thread/compact/start',{'threadId':self.session_id})
+            await asyncio.wait_for(self._compact_waiter,300)
+        except BaseException:
+            sid=self.session_id
+            await self.rpc.close()
+            self._transport_closed=True
+            if not asyncio.current_task().cancelling():
+                await self.start(sid)
+            raise
+        finally:
+            if self._compact_waiter and not self._compact_waiter.done():self._compact_waiter.cancel()
+            elif self._compact_waiter and not self._compact_waiter.cancelled():self._compact_waiter.exception()
+            self._compact_waiter=None
 
     async def interrupt(self):
         if self.active_turn:

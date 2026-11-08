@@ -12,6 +12,12 @@ class SkillLibrary:
             home/'.codex/plugins/cache',home/'.claude/plugins/cache']
         self.entries={};self.updated=0
 
+    def register_owner_roots(self,runtime_dir):
+        # Canonical installs are deployment capabilities; exclude all job scratch.
+        for root in sorted(Path(runtime_dir).glob('workspaces/*/owner/skills')):
+            if root.is_symlink():continue
+            if root not in self.roots:self.roots.append(root);self.updated=0
+
     async def refresh(self):
         if time.monotonic()-self.updated<300:return
         def scan():
@@ -38,17 +44,24 @@ class SkillLibrary:
         return {'skills':rows[offset:offset+max(1,min(limit,100))],'total':len(rows),'offset':offset}
 
     async def read(self,uid,resource='SKILL.md',offset=0):
-        await self.refresh()
-        if uid not in self.entries:raise ValueError('Unknown skill ID; use skills_list')
+        entry=await self.resolve(uid)
         rel=PurePosixPath(resource)
         if rel.is_absolute() or '..' in rel.parts or '\\' in resource or offset<0:raise ValueError('Invalid skill resource')
-        root=self.entries[uid]['root'];path=(root/resource).resolve()
+        root=entry['root'];path=(root/resource).resolve()
         if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size>500_000:
             raise ValueError('Skill resource unavailable')
-        if path.suffix.lower() not in {'.md','.txt','.py','.js','.ts','.sh','.json','.yaml','.yml','.toml','.csv'}:
+        if path.suffix.lower() not in {'.md','.txt','.py','.js','.mjs','.cjs','.ts','.sh','.bash','.json','.yaml','.yml','.toml','.csv'}:
             raise ValueError('Use a text skill resource')
         text=await asyncio.to_thread(path.read_text,errors='replace')
-        return {'text':scrub(text[offset:offset+24000]),'has_more':offset+24000<len(text),
+        return {'skill_id':entry['id'],'text':scrub(text[offset:offset+24000]),'has_more':offset+24000<len(text),
             'resources':sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and not p.is_symlink())[:200]}
+
+    async def resolve(self,uid):
+        await self.refresh()
+        if uid in self.entries:return self.entries[uid]
+        matches=[entry for entry in self.entries.values() if entry['name']==uid]
+        if len(matches)==1:return matches[0]
+        if matches:raise ValueError('Ambiguous skill name; use an exact ID from skills_list')
+        raise ValueError('Unknown skill ID or name; use skills_list with the skill name as query')
 
 LIBRARY=SkillLibrary()
