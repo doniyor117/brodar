@@ -113,6 +113,14 @@ class OwnerJobs:
             async def monitor():
                 while proc.returncode is None:
                     await asyncio.sleep(3);await self._valid(store,payload)
+                    def disk_policy():
+                        total=0
+                        for file in root.rglob('*'):
+                            if file.is_symlink() or not file.is_file():continue
+                            size=file.stat().st_size;total+=size
+                            if size>50_000_000:raise ValueError('Owner workspace file exceeds 50 MB; split/remove it before retrying')
+                            if total>getattr(self.cfg,'temp_budget_bytes',500_000_000):raise ValueError('Owner scratch budget exceeded; clean temporary work or adjust the owner budget')
+                    await asyncio.to_thread(disk_policy)
                     def cancelled():
                         with store.db.transaction(store.scope.audience,readonly=True) as c:
                             c.execute('SELECT status FROM brodar_v2.jobs WHERE audience=%s AND id=%s',(store.scope.audience,uid));row=c.fetchone();return not row or row[0]=='cancelled'
