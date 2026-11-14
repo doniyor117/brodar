@@ -56,3 +56,22 @@ def test_service_launcher_removal_is_profile_scoped(tmp_path,monkeypatch):
     launcher.write_text('brodar --profile '+str(cfg.profile_path))
     assert service(cfg,'uninstall')['data_deleted'] is False
     assert not launcher.exists()
+
+
+def test_reboot_socket_cleanup_preserves_live_and_locked_workers(tmp_path,monkeypatch):
+    import socket,fcntl
+    from brodar.service import clear_stale_control
+    cfg=SimpleNamespace(runtime_dir=tmp_path)
+    path=tmp_path/'dead.sock'
+    monkeypatch.setattr('brodar.control.socket_path',lambda cfg:path)
+    live=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);live.bind(str(path));live.listen(1)
+    try:
+        with pytest.raises(RuntimeError,match='Existing worker'):clear_stale_control(cfg)
+        assert path.exists()
+    finally:live.close()
+    with (tmp_path/'instance.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError,match='starting or draining'):clear_stale_control(cfg)
+        assert path.exists()
+    clear_stale_control(cfg)
+    assert not path.exists()

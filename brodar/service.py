@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -20,6 +21,24 @@ def identity(pid):
         start=(p/'stat').read_text().rsplit(')',1)[1].split()[19]
         return start
     except (OSError,IndexError):return None
+
+
+def clear_stale_control(cfg):
+    """A reboot leaves Unix socket files behind; never remove a live endpoint."""
+    from .control import socket_path
+    import fcntl
+    path=socket_path(cfg)
+    if not path.exists():return
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        try:probe.connect(str(path))
+        except (ConnectionRefusedError,FileNotFoundError):pass
+        else:raise RuntimeError('Existing worker/control socket detected; use its process manager')
+    # A worker may still be starting or draining before/after its socket exists.
+    with (cfg.runtime_dir/'instance.lock').open('a') as lock:
+        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise RuntimeError('An existing worker is starting or draining; try again shortly') from None
+        path.unlink(missing_ok=True)
 
 
 def service(cfg,action):
@@ -52,7 +71,12 @@ def service(cfg,action):
             launcher=boot/'brodar'
             import shlex
             command=[sys.executable,'-m','brodar','service','start','--profile',str(cfg.profile_path)]
-            atomic_private(launcher,'#!/data/data/com.termux/files/usr/bin/sh\nexec '+shlex.join(command)+'\n');launcher.chmod(0o700)
+            prefix=os.environ.get('PREFIX','/data/data/com.termux/files/usr')
+            script='#!/data/data/com.termux/files/usr/bin/sh\numask 077\n'
+            script+='export PATH='+shlex.quote(str(Path.home()/'.local/bin')+':'+prefix+'/bin')+':"$PATH"\n'
+            script+='termux-wake-lock\ncd '+shlex.quote(str(state.resolve()))+' || exit 1\n'
+            script+='exec '+shlex.join(command)+' >> '+shlex.quote(str(state.resolve()/'boot.log'))+' 2>&1\n'
+            atomic_private(launcher,script);launcher.chmod(0o700)
             return {'installed':str(launcher),'note':'Enable Termux:Boot and background/autostart permissions in Android settings'}
         if sys.platform.startswith('linux') and shutil.which('systemctl'):
             target=Path.home()/'.config/systemd/user/brodar.service'
@@ -70,19 +94,19 @@ def service(cfg,action):
             deadline=time.monotonic()+45
             while identity(saved['pid'])==saved.get('start_time') and time.monotonic()<deadline:time.sleep(.2)
             if identity(saved['pid'])==saved.get('start_time'):raise RuntimeError('Service has not drained yet; no replacement started')
-        elif socket_path(cfg).exists():raise RuntimeError('A foreground/external worker exists; stop it through its actual process manager')
+        elif socket_path(cfg).exists():clear_stale_control(cfg)
         if action=='stop':return {'stopped':True}
         running=False  # The old process has drained; restart must actually spawn its replacement.
     if action in {'start','restart'}:
         if running:return {'running':True,'already_started':True}
-        if socket_path(cfg).exists():raise RuntimeError('Existing worker/control socket detected; diagnose before starting another poller')
+        clear_stale_control(cfg)
         profile_parent=cfg.profile_path.parent
         admin=cfg.backup_admin_file or profile_parent/(cfg.profile_path.stem+'.admin-uri')
         backup_args=[]
         if admin.exists() and cfg.storage_config and cfg.storage_config.exists():
             backup_args=['--backup-admin-file',str(admin),'--backup-storage-file',str(cfg.storage_config),'--backup-key-file',str(cfg.backup_key_file or profile_parent/(cfg.profile_path.stem+'.recovery-key.json')),'--backup-interval',str(cfg.backup_interval_seconds)]
         with (state/'supervisor-console.log').open('a') as out:
-            proc=subprocess.Popen([sys.executable,'-m','brodar.service_supervisor',*backup_args,'--profile',str(cfg.profile_path)],stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,start_new_session=True,env={**os.environ,'BRODAR_RUNTIME_DIR':str(state)})
+            proc=subprocess.Popen([sys.executable,'-m','brodar.service_supervisor',*backup_args,'--profile',str(cfg.profile_path)],cwd=str(state.resolve()),stdin=subprocess.DEVNULL,stdout=out,stderr=subprocess.STDOUT,start_new_session=True,env={**os.environ,'BRODAR_RUNTIME_DIR':str(state)})
         start=None
         for _ in range(20):
             start=identity(proc.pid)

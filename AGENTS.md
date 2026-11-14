@@ -74,6 +74,8 @@ The TUI attaches through a same-user private Unix socket; no second Telegram pol
 
 `service` manages the packaged supervisor with process identity/start-time checks, graceful drain and platform detection. Termux wake-lock/Boot and Linux user-service launchers are conditional. Choose one process manager. A pid or “started” message alone is not readiness proof.
 
+Reboot recovery: `service start/restart/stop` may clear a dead Unix control socket only after connection refusal and acquiring the worker instance lock; never unlink a responsive endpoint or a starting/draining worker's socket. Supervisors launch from the resolved runtime directory rather than inheriting a source checkout. Termux boot launchers set the executable PATH, acquire a wake lock, select the explicit profile and capture boot diagnostics. Replace legacy instance boot scripts outside the boot directory (backup scripts inside it execute too). Termux:Boot must be installed/opened once, with Android background/autostart permissions; no script guarantees survival if Android kills the entire app.
+
 ## Files to change
 
 | Concern | Modules |
